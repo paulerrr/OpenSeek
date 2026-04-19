@@ -98,10 +98,9 @@ class DeepSeek:
         self.browser = await zendriver.start(chrome_args=self.chrome_args, headless=self.headless)
         await self.browser.get("https://chat.deepseek.com/")
 
-        if self.attempt_cf_bypass:
-            self.logger.debug("Attempting Cloudflare verification...")
-            with contextlib.suppress(Exception):
-                await self.browser.main_tab.verify_cf()
+        self.logger.debug("Waiting for page to load...")
+        with contextlib.suppress(Exception):
+            await self.browser.main_tab.wait_for(self.selectors.login.email_input, timeout=15)
 
         self._initialized = True
         asyncio.create_task(self._keep_alive())
@@ -119,14 +118,10 @@ class DeepSeek:
         tab = self.browser.main_tab
         await (await tab.select(self.selectors.login.email_input)).send_keys(self.email)
         await (await tab.select(self.selectors.login.password_input)).send_keys(self.password)
-
-        if self.attempt_cf_bypass:
-            await (await tab.select(self.selectors.login.confirm_checkbox)).click()
-
         await (await tab.select(self.selectors.login.login_button)).click()
 
         try:
-            await tab.wait_for(self.selectors.interactions.textbox, timeout=10)
+            await tab.wait_for(self.selectors.interactions.textbox, timeout=20)
             self.logger.info("Successfully logged into DeepSeek.")
         except Exception as e:
             raise InvalidCredentials("Login failed, check your credentials.") from e
@@ -200,7 +195,8 @@ class DeepSeek:
             latest_response = responses[-1]
 
             soup = BeautifulSoup(repr(latest_response), "html.parser")
-            markdown = "\n\n".join(get_text(str(block)).strip() for block in soup.select(".ds-markdown--block"))
+            blocks = soup.select(".ds-markdown--block") or soup.select(".ds-markdown")
+            markdown = "\n\n".join(get_text(str(block)).strip() for block in blocks)
 
             if "server is busy" in markdown.lower():
                 raise ServerDown("Server busy, try again later.")

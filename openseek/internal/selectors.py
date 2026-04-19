@@ -5,22 +5,21 @@ from dataclasses import dataclass, field
 class LoginSelectors:
     email_input: str = 'input[type="text"]'
     password_input: str = 'input[type="password"]'
-    confirm_checkbox: str = 'div[class="ds-checkbox ds-checkbox--none ds-checkbox--bordered"]'
-    login_button: str = 'div[role="button"]'
+    login_button: str = 'button.ds-basic-button--primary'
 
 
 @dataclass
 class InteractionSelectors:
-    textbox: str = 'textarea[class="_27c9245"]'
-    send_options_parent: str = 'div[class="ec4f5d61"]'
-    send_button: str = 'div[class="_6f28693"]'
-    new_chat_button: str = 'div[class="_5a8ac7a"]'
+    textbox: str = 'textarea._27c9245'
+    send_options_parent: str = 'div.ec4f5d61'
+    send_button: str = 'div._52c986b'
+    new_chat_button: str = 'div._5a8ac7a'
 
 
 @dataclass
 class BackendSelectors:
-    response_generating: str = 'div[class="_4f9bf79 d7dc56a8"]'
-    response_generated: str = 'div[class="_4f9bf79 d7dc56a8 _43c05b5"]'
+    response_generating: str = 'div._4f9bf79.d7dc56a8'
+    response_generated: str = 'div._4f9bf79.d7dc56a8._43c05b5'
 
 
 @dataclass
