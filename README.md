@@ -133,6 +133,8 @@ DEEPSEEK_TOKEN=<token> python server.py
 - `POST /v1/chat/completions` with `stream` support. Use model `deepseek-reasoner` (or `"deepthink": true`) for
   DeepThink, whose reasoning is returned as `reasoning_content`; `"search": true` enables web search.
 - `system` / `developer` messages become a hidden system prompt.
+  They follow OpenSeek's default instructions (`openseek/internal/prompt.py`), which explain the
+  tool-calling, history-replay and attachment formats to the model.
 - Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`) are
   uploaded with the message, up to 50 files of 100 MB each. A replayed conversation re-uploads its earlier ones.
 - `tools` and `tool_choice` work through a prompt protocol: the tools are described to the model, and the
@@ -142,7 +144,8 @@ DEEPSEEK_TOKEN=<token> python server.py
   new chat.
 
 Environment variables: `DEEPSEEK_TOKEN` (or `DEEPSEEK_EMAIL` and `DEEPSEEK_PASSWORD`), `OPENSEEK_PORT`,
-`OPENSEEK_TIMEOUT` (seconds, default 300) and `OPENSEEK_USER_DATA_DIR`.
+`OPENSEEK_TIMEOUT` (seconds, default 300), `OPENSEEK_USER_DATA_DIR` and `OPENSEEK_SYSTEM_PROMPT_FILE`
+(a file that replaces the default instructions; an empty file disables them).
 
 ## Error Handling
 

@@ -9,3 +9,5 @@ poetry.lock
 .env
 __pycache__/
 .ruff_cache/
+# Local system prompt override (OPENSEEK_SYSTEM_PROMPT_FILE)
+system_prompt.txt

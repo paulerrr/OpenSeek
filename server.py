@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict
 sys.path.insert(0, os.path.dirname(__file__))
 from openseek import DeepSeek
 from openseek.internal.exceptions import FileUploadError, OpenSeekException
+from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
 from openseek.internal.tools import (
     BLOCK_RE,
     TOOLS_REMINDER,
@@ -64,6 +65,8 @@ PASSWORD = os.getenv("DEEPSEEK_PASSWORD", "")
 TOKEN = os.getenv("DEEPSEEK_TOKEN", "")
 USER_DATA_DIR = os.getenv("OPENSEEK_USER_DATA_DIR") or None
 TIMEOUT = int(os.getenv("OPENSEEK_TIMEOUT", "300"))
+# A file whose contents replace the default instructions; an empty file disables them
+SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
 MAX_CONVERSATIONS = 64
 # DeepSeek's per-message attachment limits
 MAX_FILES = 50
@@ -87,6 +90,19 @@ class _State:
 
 
 state = _State()
+
+
+def _load_default_prompt() -> str:
+    if not SYSTEM_PROMPT_FILE:
+        return DEFAULT_SYSTEM_PROMPT
+    try:
+        return Path(SYSTEM_PROMPT_FILE).read_text().strip()
+    except OSError as e:
+        logger.error("Could not read OPENSEEK_SYSTEM_PROMPT_FILE: %s", e)
+        sys.exit(1)
+
+
+DEFAULT_PROMPT = _load_default_prompt()
 
 
 @asynccontextmanager
@@ -301,7 +317,9 @@ async def chat_completions(req: _ChatRequest):
 
     tools = req.tools if req.tools and req.tool_choice != "none" else None
     instructions = "\n\n".join(
-        part for part in (system, build_tools_prompt(tools, req.tool_choice) if tools else "") if part
+        part
+        for part in (DEFAULT_PROMPT, system, build_tools_prompt(tools, req.tool_choice) if tools else "")
+        if part
     )
     instructions_hash = _hash(instructions) if instructions else None
 
