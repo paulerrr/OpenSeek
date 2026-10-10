@@ -1,4 +1,5 @@
 venv
+.venv
 main.py
 async_main.py
 sync_main.py
