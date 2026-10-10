@@ -4,4 +4,5 @@ async_main.py
 sync_main.py
 .idea
 dist
-poetry.lock
+poetry.lock.env
+__pycache__/

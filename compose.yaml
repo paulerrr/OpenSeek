@@ -1,0 +1,12 @@
+services:
+  openseek:
+    build: .
+    ports:
+      - "8888:8888"
+    environment:
+      - DEEPSEEK_EMAIL=${DEEPSEEK_EMAIL}
+      - DEEPSEEK_PASSWORD=${DEEPSEEK_PASSWORD}
+      - OPENSEEK_PORT=8888
+    # Xvfb needs /dev/shm for Chrome's shared memory
+    shm_size: 256mb
+    restart: unless-stopped
