@@ -16,3 +16,11 @@ class ServerDown(OpenSeekException):
 
 class MissingInitialization(OpenSeekException):
     pass
+
+
+class VerificationRequired(OpenSeekException):
+    pass
+
+
+class FileUploadError(OpenSeekException):
+    pass

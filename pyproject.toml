@@ -24,9 +24,7 @@ classifiers = [
     "Natural Language :: English",
 ]
 dependencies = [
-    "beautifulsoup4 (>=4.13.3,<5.0.0)",
-    "zendriver (>=0.5.1,<0.6.0)",
-    "inscriptis (>=2.6.0,<3.0.0)",
+    "zendriver (>=0.17.1,<0.18.0)",
     "pyvirtualdisplay (>=3.0,<4.0)"
 ]
 

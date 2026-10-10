@@ -6,6 +6,7 @@ services:
     environment:
       - DEEPSEEK_EMAIL=${DEEPSEEK_EMAIL}
       - DEEPSEEK_PASSWORD=${DEEPSEEK_PASSWORD}
+      - DEEPSEEK_TOKEN=${DEEPSEEK_TOKEN}
       - OPENSEEK_PORT=8888
     # Xvfb needs /dev/shm for Chrome's shared memory
     shm_size: 256mb

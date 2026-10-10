@@ -13,9 +13,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 # Install openseek deps + server deps
 RUN pip install --no-cache-dir \
-    beautifulsoup4 \
-    zendriver \
-    inscriptis \
+    "zendriver>=0.17.1,<0.18" \
     pyvirtualdisplay \
     fastapi \
     uvicorn
