@@ -49,7 +49,6 @@ from openseek import DeepSeek
 from openseek.internal.exceptions import FileUploadError, OpenSeekException
 from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
 from openseek.internal.tools import (
-    BLOCK_RE,
     TOOLS_REMINDER,
     ToolCallStreamFilter,
     build_tools_prompt,
@@ -306,11 +305,18 @@ def _message_key(role: str, content, tool_calls: list[dict] | None = None, tool_
     """
     Fingerprint of a message, stable across the client echoing it back.
 
-    Whitespace is normalized, since the streamed text a client keeps can differ in blank lines from the parsed
-    content the server remembers.
+    Preserve whitespace and tool payloads so edits cannot silently reuse stale browser context.
     """
-    call_ids = [call.get("id") for call in tool_calls or []]
-    return _hash([role, " ".join(_to_text(content).split()), call_ids, tool_call_id])
+    calls = []
+    for call in tool_calls or []:
+        function = call.get("function") or {}
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            # Clients such as opencode parse and reserialize arguments between turns.
+            with contextlib.suppress(json.JSONDecodeError):
+                arguments = json.loads(arguments)
+        calls.append([call.get("id"), call.get("type", "function"), function.get("name"), arguments])
+    return _hash([role, _to_text(content), calls, tool_call_id])
 
 
 def _conversation_key(keys: list[str]) -> str:
@@ -603,6 +609,7 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
 
     yield chunk({"role": "assistant", "content": ""})
     text_filter = ToolCallStreamFilter() if tools else None
+    emitted_text = []
     response = None
     try:
         async for event in _with_keepalive(stream):
@@ -613,6 +620,7 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
             elif event.type == "text":
                 text = text_filter.feed(event.content) if text_filter else event.content
                 if text:
+                    emitted_text.append(text)
                     yield chunk({"content": text})
             elif event.type == "done":
                 response = event.response
@@ -639,16 +647,16 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
     if text_filter:
         rest = text_filter.finish()
         content, calls = parse_tool_calls(response.text)
-        # Blocks that weren't valid calls were held back while streaming; send them as text now
-        held_back = "".join(match.group(0) for match in BLOCK_RE.finditer(content)) + rest
-        if held_back:
-            yield chunk({"content": held_back})
+        if rest:
+            emitted_text.append(rest)
+            yield chunk({"content": rest})
         if calls:
             yield chunk(
                 {"tool_calls": [{"index": i, **call} for i, call in enumerate(calls)]},
             )
 
-    remember(response, content, calls)
+    # Cache exactly what the streaming client receives, including significant whitespace.
+    remember(response, "".join(emitted_text), calls)
     logger.info("← streamed %d chars, %d tool calls", len(content), len(calls))
     yield chunk({}, "tool_calls" if calls else "stop", usage=_usage(response))
     yield "data: [DONE]\n\n"

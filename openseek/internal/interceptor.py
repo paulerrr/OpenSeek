@@ -93,6 +93,9 @@ INTERCEPTOR_JS = r"""
         }
       };
       this.addEventListener("progress", flush);
+      for (const kind of ["error", "abort", "timeout"]) {
+        this.addEventListener(kind, () => emit({ token, kind: "transport_error", error: kind }));
+      }
       this.addEventListener("loadend", () => {
         flush();
         emit({ token, kind: "done", status: this.status });
@@ -112,7 +115,13 @@ INTERCEPTOR_JS = r"""
     if (!isTarget(url) || !init || typeof init.body !== "string") return originalFetch.apply(this, arguments);
 
     const { body: nextBody, token } = mutate(init.body);
-    const response = await originalFetch.call(this, input, { ...init, body: nextBody });
+    let response;
+    try {
+      response = await originalFetch.call(this, input, { ...init, body: nextBody });
+    } catch (error) {
+      if (token) emit({ token, kind: "transport_error", error: String(error) });
+      throw error;
+    }
     if (token && response.body) {
       (async () => {
         const reader = response.clone().body.getReader();
@@ -123,8 +132,11 @@ INTERCEPTOR_JS = r"""
             if (value) emit({ token, kind: "chunk", data: decoder.decode(value, { stream: !done }) });
             if (done) break;
           }
-        } finally {
           emit({ token, kind: "done", status: response.status });
+        } catch (error) {
+          emit({ token, kind: "transport_error", error: String(error) });
+        } finally {
+          reader.releaseLock();
         }
       })();
     }

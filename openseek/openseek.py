@@ -421,6 +421,8 @@ class DeepSeek:
                     self.logger.warning(f"Only {attached} of {expected_files} files were attached to the request.")
             elif kind == "error":
                 self.logger.warning(f"Could not modify the chat request: {message.get('error')}")
+            elif kind == "transport_error":
+                raise ServerDown(f"DeepSeek connection interrupted: {message.get('error')}")
             elif kind == "chunk":
                 raw += message["data"]
                 for event, data in sse.feed(message["data"]):
@@ -434,6 +436,8 @@ class DeepSeek:
                 return
 
     def _build_response(self, state: ResponseState, raw: str, status: int | None, chat_id: str | None) -> Response:
+        if status is None or not 200 <= status < 300:
+            raise ServerDown(f"DeepSeek request failed (HTTP {status})")
         if not state.fragments:
             # Errors come back as a plain JSON body instead of an event stream
             detail = raw.strip()

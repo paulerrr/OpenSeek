@@ -173,6 +173,9 @@ class ToolCallStreamFilter:
                 end = self._close_re.search(self._buffer)
                 if end is None:
                     return output
+                block = self._open + self._buffer[: end.end()]
+                if not parse_tool_calls(block)[1]:
+                    output += block
                 self._buffer = self._buffer[end.end() :]
                 self._open, self._close_re = "", None
             else:

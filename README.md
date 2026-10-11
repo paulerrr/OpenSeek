@@ -265,6 +265,20 @@ Requests share one browser tab, so they are processed one at a time. opencode se
 chat by session ID, and other conversations by a fingerprint of their messages, so a follow-up turn only sends the new
 messages.
 
+Session matching preserves message whitespace and tool names and arguments, so edits to code or tool calls
+start a fresh chat with the corrected history. Streaming sessions remember the exact text delivered to the client.
+The first continuation of a session saved by an older version may replay its history once to adopt the new fingerprints.
+Session-ID tracking, local titles, compaction handling, persistent mappings, and streaming keepalives remain enabled.
+
+Malformed tool-call blocks remain ordinary text in their original position. Interrupted or failed upstream requests
+return an error (an SSE error event when streaming), rather than a successful partial answer, and are not recorded
+as completed turns.
+
+### Regression tests
+
+With the server dependencies installed, run `python -m unittest discover -s tests -v`.
+Run `node --test tests/interceptor.test.cjs` to check browser transport-error handling without opening a browser.
+
 ## ⚙️ Configuration
 
 | Variable                      | Default | Description                                                       |
