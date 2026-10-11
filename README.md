@@ -1,16 +1,116 @@
-**OpenSeek** is an open-source Python library that provides free access to DeepSeek models. Designed for developers and
-researchers, it offers a simple and unified interface to interact with various DeepSeek LLM models without requiring API
-keys, subscriptions, or paid plans.
+<div align="center">
 
-## Installation
+# 🐋 OpenSeek
 
-```cmd
-pip install openseek
+**Use the DeepSeek web chat as an OpenAI-compatible API, with no API key needed.**
+
+Point the OpenAI SDK, a coding agent or any OpenAI-style client at `http://localhost:8888/v1`.
+Streaming, DeepThink reasoning, web search, tool calling and file attachments all work.
+
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![OpenAI compatible](https://img.shields.io/badge/API-OpenAI%20compatible-412991?logo=openai&logoColor=white)](#-openai-compatible-server)
+[![Docker](https://img.shields.io/badge/docker-compose%20up-2496ED?logo=docker&logoColor=white)](#-run-with-docker)
+
+[Quick start](#-quick-start) · [Server](#-openai-compatible-server) · [Python library](#-python-library) · [How it works](#-how-it-works) · [Configuration](#%EF%B8%8F-configuration)
+
+</div>
+
+---
+
+## ✨ Why OpenSeek?
+
+- 🔑 **No API key or billing.** It uses the free DeepSeek account you already have.
+- 🔌 **Drop-in OpenAI API.** `/v1/chat/completions` and `/v1/models`, so existing tools work with only a base-URL change.
+- 🧠 **DeepThink reasoning.** Pick the `deepseek-reasoner` model and the reasoning streams back as `reasoning_content`.
+- 🛠️ **Tool calling.** `tools` / `tool_calls` work, so coding agents can read files, run commands and loop.
+- 🌐 **Web search.** Send `"search": true` to ground answers in DeepSeek's live search results.
+- 📎 **Attachments.** Images, PDFs, Office documents and code files, up to 50 files per message.
+- ⚡ **Real streaming.** Tokens come from DeepSeek's own response stream, not from scraping the page, so the output is the model's raw Markdown.
+- 💬 **Conversation memory.** Each conversation maps to a DeepSeek chat, and is replayed into a new one if the server restarts.
+- 🐳 **One-command deploy.** `docker compose up` brings up Chrome, Xvfb and the server.
+
+## 🚀 Quick start
+
+### 1. Get your DeepSeek token
+
+Log in at [chat.deepseek.com](https://chat.deepseek.com), open the developer console (F12) and run:
+
+```js
+JSON.parse(localStorage.userToken).value
 ```
 
-## Quick Start
+Using the token skips the email verification step that can block password logins.
 
-### Asynchronous Usage
+### 2. Start the server
+
+```bash
+git clone https://github.com/paulerrr/OpenSeek.git && cd OpenSeek
+pip install . fastapi uvicorn
+DEEPSEEK_TOKEN=<your-token> python server.py
+```
+
+### 3. Call it like OpenAI
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8888/v1", api_key="anything")
+
+stream = client.chat.completions.create(
+    model="deepseek-chat",  # or "deepseek-reasoner" for DeepThink
+    messages=[{"role": "user", "content": "Write a haiku about whales"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+Or with `curl`:
+
+```bash
+curl http://localhost:8888/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "deepseek-chat", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+## 🐳 Run with Docker
+
+```bash
+cp .env.example .env   # fill in DEEPSEEK_TOKEN
+docker compose up -d
+```
+
+The image includes Chromium and Xvfb, so the host doesn't need a display or a browser.
+
+## 🔌 OpenAI-compatible server
+
+| Endpoint                    | Description                               |
+|-----------------------------|-------------------------------------------|
+| `POST /v1/chat/completions` | Chat completions, streaming or not        |
+| `GET /v1/models`            | Lists `deepseek-chat` and `deepseek-reasoner` |
+| `GET /health`               | Session status                            |
+
+**Request options**
+
+- `model`: `deepseek-reasoner`, or any name containing `think`, turns on DeepThink. You can also send `"deepthink": true`.
+- `"search": true` turns on DeepSeek's web search for that turn.
+- `system` / `developer` messages become a hidden system prompt. It goes into the request payload and is never typed into the chat. It comes after OpenSeek's default instructions (`openseek/internal/prompt.py`), which teach the model the tool-calling, history-replay and attachment formats.
+- `tools` and `tool_choice` work through a prompt protocol. The tools are described to the model, and the `<tool_call>` blocks it writes (or DeepSeek's native DSML markup) come back as standard `tool_calls`. Send results back as `tool` messages, as usual.
+- Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`), up to 50 files of 100 MB each.
+
+### Use it with coding agents
+
+Any agent that accepts a custom OpenAI base URL works. For example, with openclaude:
+
+```bash
+bun run profile:init -- --provider openai --model deepseek-chat \
+    --base-url http://localhost:8888/v1 --api-key dummy
+```
+
+## 🐍 Python library
+
+You can also drive DeepSeek directly from Python, without the server.
 
 ```python
 import asyncio
@@ -18,89 +118,17 @@ from openseek import DeepSeek
 
 
 async def main():
-    async with DeepSeek(
-            email="your_email@example.com",
-            password="your_password"
-    ) as api:
-        response = await api.send_message("Tell me about quantum physics")
+    async with DeepSeek(token="<your-token>") as api:
+        response = await api.send_message("Tell me about quantum physics", deepthink=True)
+        print(response.deepthink_content)
         print(response.text)
 
 
 asyncio.run(main())
 ```
 
-### Synchronous Usage
-
-```python
-from openseek import DeepSeek
-
-
-def main():
-    api = DeepSeek(
-        email="your_email@example.com",
-        password="your_password"
-    )
-
-    try:
-        api.initialize_sync()
-        response = api.send_message_sync("Tell me about quantum physics")
-        print(response.text)
-    finally:
-        api.close_sync()
-
-
-main()
-```
-
-## Features
-
-- **Free Access**: Use DeepSeek models without API keys or paid subscriptions
-- **Asynchronous and Synchronous API**: Flexibility for different usage scenarios
-- **DeepThink Mode**: Activate advanced thinking features for more complex queries
-- **Search Support**: Enable web search to get up-to-date information
-- **Session Management**: Resume existing chats using a session ID
-- **Streaming**: Receive DeepThink reasoning and the answer as they are generated
-- **Hidden System Prompts**: Instructions are added to the request payload, not typed into the chat
-- **Attachments**: Send images, PDFs, Office documents and code files with a message
-- **OpenAI-Compatible Server**: `server.py` serves `/v1/chat/completions` with streaming and tool calling
-
-## Parameters
-
-When initializing `DeepSeek`, the following parameters are available:
-
-| Parameter         | Type             | Default | Description                             |
-|-------------------|------------------|---------|-----------------------------------------|
-| email             | Optional\[str\]  | None    | Email for logging into DeepSeek         |
-| password          | Optional\[str\]  | None    | Password for logging into DeepSeek      |
-| token             | Optional\[str\]  | None    | User token; skips login and email verification |
-| user_data_dir     | Optional\[str\]  | None    | Persistent Chrome profile directory     |
-| headless          | bool             | True    | Launch browser in headless mode         |
-| verbose           | bool             | False   | Enable detailed logging                 |
-| chrome_args       | Optional\[List\] | None    | Additional arguments for Chrome         |
-| attempt_cf_bypass | bool             | True    | Attempt to bypass Cloudflare protection |
-
-## Sending Messages
-
-The `send_message` method accepts:
-
-| Parameter       | Type  | Default | Description                                     |
-|-----------------|-------|---------|-------------------------------------------------|
-| message         | str   | -       | Message text to send                            |
-| slow_mode       | bool  | False   | Send the message slowly, character by character |
-| deepthink       | bool  | False   | Activate DeepThink feature                      |
-| search          | bool  | False   | Activate search feature                         |
-| timeout         | int   | 60      | Maximum response waiting time                   |
-| slow_mode_delay | float | 0.25    | Delay between characters in slow\_mode          |
-| chat_id         | str   | None    | ID of an existing chat to continue              |
-| system_prompt   | str   | None    | Hidden instructions sent with the message       |
-| files           | list  | None    | Paths of files to attach (images, documents...) |
-
-The returned `Response` has `text`, `chat_id`, `deepthink_content`, `deepthink_duration`, `search_results`,
-`message_id` and `token_usage`.
-
-### Streaming
-
-`stream_message` takes the same arguments and yields events as the response is generated:
+<details>
+<summary><b>Streaming</b></summary>
 
 ```python
 async for event in api.stream_message("Explain tides", deepthink=True):
@@ -112,61 +140,119 @@ async for event in api.stream_message("Explain tides", deepthink=True):
         response = event.response      # the complete Response
 ```
 
-Replies are read from DeepSeek's own response stream rather than the rendered page, so the text is the model's
-raw markdown.
+</details>
 
-### Getting a token
+<details>
+<summary><b>Synchronous usage</b></summary>
 
-Password login can be blocked by DeepSeek's email verification step. To avoid it, log in at
-chat.deepseek.com in a browser, open the developer console and run
-`JSON.parse(localStorage.userToken).value`, then pass the result as `token`.
+```python
+from openseek import DeepSeek
 
-## OpenAI-Compatible Server
-
-`server.py` exposes the library as an OpenAI-style API on port 8888 (or run it with `docker compose up`):
-
-```bash
-pip install fastapi uvicorn
-DEEPSEEK_TOKEN=<token> python server.py
+api = DeepSeek(token="<your-token>")
+try:
+    api.initialize_sync()
+    print(api.send_message_sync("Tell me about quantum physics").text)
+finally:
+    api.close_sync()
 ```
 
-- `POST /v1/chat/completions` with `stream` support. Use model `deepseek-reasoner` (or `"deepthink": true`) for
-  DeepThink, whose reasoning is returned as `reasoning_content`; `"search": true` enables web search.
-- `system` / `developer` messages become a hidden system prompt.
-  They follow OpenSeek's default instructions (`openseek/internal/prompt.py`), which explain the
-  tool-calling, history-replay and attachment formats to the model.
-- Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`) are
-  uploaded with the message, up to 50 files of 100 MB each. A replayed conversation re-uploads its earlier ones.
-- `tools` and `tool_choice` work through a prompt protocol: the tools are described to the model, and the
-  `<tool_call>` blocks it writes are returned as `tool_calls`. Send results back as `tool` messages as usual.
-- Each conversation is matched to its DeepSeek chat by its message history, so several clients can be
-  served at once. A conversation the server hasn't seen (for example after a restart) is replayed into a
-  new chat.
+</details>
 
-Environment variables: `DEEPSEEK_TOKEN` (or `DEEPSEEK_EMAIL` and `DEEPSEEK_PASSWORD`), `OPENSEEK_PORT`,
-`OPENSEEK_TIMEOUT` (seconds, default 300), `OPENSEEK_USER_DATA_DIR` and `OPENSEEK_SYSTEM_PROMPT_FILE`
-(a file that replaces the default instructions; an empty file disables them).
+<details>
+<summary><b><code>DeepSeek(...)</code> parameters</b></summary>
 
-## Error Handling
+| Parameter         | Type          | Default | Description                                         |
+|-------------------|---------------|---------|-----------------------------------------------------|
+| token             | `str \| None` | None    | User token; skips the login form and email verification |
+| email             | `str \| None` | None    | Email for logging in to DeepSeek                    |
+| password          | `str \| None` | None    | Password for logging in to DeepSeek                 |
+| user_data_dir     | `str \| None` | None    | Persistent Chrome profile, so the login survives restarts |
+| headless          | `bool`        | True    | Launch the browser in headless mode                 |
+| verbose           | `bool`        | False   | Enable detailed logging                             |
+| chrome_args       | `list \| None`| None    | Additional arguments for Chrome                     |
+| attempt_cf_bypass | `bool`        | True    | Attempt to bypass Cloudflare protection             |
 
-The library can raise the following exceptions:
+</details>
 
-- `MissingCredentials`: Missing credentials (token, or email and password)
+<details>
+<summary><b><code>send_message(...)</code> / <code>stream_message(...)</code> parameters</b></summary>
+
+| Parameter       | Type    | Default | Description                                     |
+|-----------------|---------|---------|-------------------------------------------------|
+| message         | `str`   | -       | Message text to send                            |
+| deepthink       | `bool`  | False   | Turn on DeepThink                               |
+| search          | `bool`  | False   | Turn on web search                              |
+| system_prompt   | `str`   | None    | Hidden instructions sent with the message       |
+| files           | `list`  | None    | Paths of files to attach (images, documents...) |
+| chat_id         | `str`   | None    | ID of an existing chat to continue              |
+| timeout         | `int`   | 60      | Maximum time to wait for the response, in seconds |
+| slow_mode       | `bool`  | False   | Type the message character by character         |
+| slow_mode_delay | `float` | 0.25    | Delay between characters in slow mode           |
+
+The returned `Response` has `text`, `chat_id`, `deepthink_content`, `deepthink_duration`, `search_results`,
+`message_id` and `token_usage`.
+
+</details>
+
+<details>
+<summary><b>Exceptions</b></summary>
+
+- `MissingCredentials`: no token, and no email and password, were given
 - `VerificationRequired`: DeepSeek asked for email verification during password login
-- `FileUploadError`: An attached file is missing, of an unsupported type, or failed to process
-- `InvalidCredentials`: Invalid credentials
-- `ServerDown`: DeepSeek server is unavailable
-- `MissingInitialization`: Required dependencies are missing or initialization not done
+- `InvalidCredentials`: the login failed
+- `FileUploadError`: an attachment is missing, has an unsupported type, or failed to process
+- `ServerDown`: DeepSeek is busy or returned an error
+- `MissingInitialization`: dependencies are missing, or `initialize()` wasn't called
 
-## Requirements
+</details>
 
-- Python 3.10 or higher
-- Dependencies: beautifulsoup4, zendriver, inscriptis, pyvirtualdisplay (for Linux)
+## 🔍 How it works
 
-## License
+```mermaid
+flowchart LR
+    C[OpenAI client /<br/>coding agent] -->|/v1/chat/completions| S[server.py<br/>FastAPI]
+    S -->|stream_message| L[DeepSeek class<br/>zendriver + CDP]
+    L -->|types message,<br/>clicks Send| B[Chrome<br/>chat.deepseek.com]
+    B -->|request passes through<br/>injected interceptor| D[(DeepSeek)]
+    D -->|SSE stream| B
+    B -->|raw chunks via<br/>CDP binding| L
+    L -->|thinking / text deltas| S
+    S -->|OpenAI chunks +<br/>tool_calls| C
+```
 
-MIT - see [LICENSE](LICENSE) for details.
+1. OpenSeek drives a real Chrome session with [zendriver](https://pypi.org/project/zendriver/) and logs in with your token or password.
+2. A small script is injected before DeepSeek's own code runs. It wraps `fetch` / `XMLHttpRequest`, so when a message is sent it can add the hidden system prompt and DeepThink/Search flags to the request payload.
+3. The raw response stream is forwarded to Python through a CDP binding. There, DeepSeek's JSON-patch events are rebuilt into reasoning and answer text.
+4. The server converts that text into OpenAI-format responses, and parses `<tool_call>` blocks into `tool_calls`.
 
-## Author
+Requests share one browser tab, so they are processed one at a time.
 
-Daniel Cuzneţov <danielcuznetov04@gmail.com>
+## ⚙️ Configuration
+
+| Variable                      | Default | Description                                                       |
+|-------------------------------|---------|-------------------------------------------------------------------|
+| `DEEPSEEK_TOKEN`              | -       | User token (recommended)                                          |
+| `DEEPSEEK_EMAIL` / `DEEPSEEK_PASSWORD` | - | Alternative to the token; may hit email verification          |
+| `OPENSEEK_PORT`               | `8888`  | Server port                                                       |
+| `OPENSEEK_TIMEOUT`            | `300`   | Seconds to wait for a reply                                       |
+| `OPENSEEK_USER_DATA_DIR`      | -       | Persistent Chrome profile directory                               |
+| `OPENSEEK_SYSTEM_PROMPT_FILE` | -       | File that replaces the default instructions (an empty file disables them) |
+
+**Requirements:** Python 3.10+, Chrome or Chromium, and Xvfb on Linux servers without a display (installed automatically in Docker).
+
+## ⚠️ Disclaimer
+
+OpenSeek is an unofficial project and is not affiliated with DeepSeek. It automates the public web chat, so it can
+break when the site changes, and your use of it is subject to DeepSeek's terms of service. For production workloads,
+use the [official DeepSeek API](https://platform.deepseek.com/).
+
+## 🙏 Credits
+
+OpenSeek was originally created by [Daniel Cuzneţov](https://github.com/DCDie/OpenSeek). This fork adds the
+OpenAI-compatible server, streaming, tool calling, attachments and hidden system prompts.
+
+If OpenSeek is useful to you, consider giving it a ⭐. It helps other people find the project.
+
+## 📄 License
+
+MIT. See [LICENSE](LICENSE).
