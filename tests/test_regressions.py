@@ -80,6 +80,27 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         content, remembered, _ = await self.collect('  exact\n\n text  ', tools=False)
         self.assertEqual(remembered[0][1], content)
 
+    async def test_misspelled_and_missing_close_tags(self):
+        read = '{"name": "read", "arguments": {"path": "%s"}}'
+        text = ('Reading.\n<tool_call>\n' + read % 'a' + '\n</call_call>\n<tool_call>\n' + read % 'b'
+                + '\n</tool_call>\n<tool_call>\n' + read % 'c' + '\n<tool_call>\n' + read % 'd' + '\n</call_call>')
+        content, remembered, payloads = await self.collect(text)
+        self.assertEqual(content.strip(), 'Reading.')
+        paths = [json.loads(call['function']['arguments'])['path'] for call in remembered[0][2]]
+        self.assertEqual(paths, ['a', 'b', 'c', 'd'])
+        self.assertEqual(payloads[-1]['choices'][0]['finish_reason'], 'tool_calls')
+
+    async def test_dsml_without_inner_delimiters(self):
+        text = ('Searching.\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="grep">\n'
+                '<｜｜DSML｜｜ parameter name="pattern" string="true">def |class </｜｜DSML｜｜ parameter>\n'
+                '<｜｜DSML｜｜ parameter name="limit" string="false">150</parameter>\n'
+                '</invoke>\n</｜｜DSML｜｜ calls>')
+        content, remembered, _ = await self.collect(text)
+        self.assertEqual(content.strip(), 'Searching.')
+        call = remembered[0][2][0]['function']
+        self.assertEqual(call['name'], 'grep')
+        self.assertEqual(json.loads(call['arguments']), {'pattern': 'def |class ', 'limit': 150})
+
     async def test_transport_failure_never_remembers_or_finishes_successfully(self):
         ds = DeepSeek(token='test')
         ds._events.put_nowait({'kind': 'chunk', 'data': 'data: ' + json.dumps({

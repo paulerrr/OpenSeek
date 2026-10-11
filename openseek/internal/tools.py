@@ -17,17 +17,23 @@ CLOSE_TAG = "</tool_call>"
 _DSML = r"[｜|]+\s*DSML\s*[｜|]+\s*"
 _DSML_OPEN = rf"<{_DSML}(?:function_)?calls\s*>"
 _DSML_CLOSE_RE = re.compile(rf"</{_DSML}(?:function_)?calls\s*>")
-_INVOKE_RE = re.compile(rf'<{_DSML}invoke\s+name="([^"]*)"\s*>(.*?)</{_DSML}invoke\s*>', re.DOTALL)
+# Inner closing tags sometimes come back without the DSML delimiter (</invoke>)
+_INVOKE_RE = re.compile(rf'<{_DSML}invoke\s+name="([^"]*)"\s*>(.*?)</(?:{_DSML})?invoke\s*>', re.DOTALL)
 _PARAMETER_RE = re.compile(
-    rf'<{_DSML}parameter\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>(.*?)</{_DSML}parameter\s*>', re.DOTALL
-)
-
-BLOCK_RE = re.compile(
-    rf"{re.escape(OPEN_TAG)}(?P<json>.*?){re.escape(CLOSE_TAG)}|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}",
+    rf'<{_DSML}parameter\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>(.*?)</(?:{_DSML})?parameter\s*>',
     re.DOTALL,
 )
-_OPEN_RE = re.compile(rf"{re.escape(OPEN_TAG)}|{_DSML_OPEN}")
-_CLOSE_TAG_RE = re.compile(re.escape(CLOSE_TAG))
+
+# The model sometimes misspells the closing tag (</call_call>) or leaves it out before the next block,
+# so a block ends at any closing tag containing "call", just before the next opening tag, or at the end
+_OPEN = re.escape(OPEN_TAG)
+_CLOSE = rf"</\s*[A-Za-z_]*call[A-Za-z_]*\s*>|(?={_OPEN})"
+BLOCK_RE = re.compile(
+    rf"{_OPEN}(?P<json>(?:(?!{_OPEN}).)*?)(?:{_CLOSE}|\Z)|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}",
+    re.DOTALL,
+)
+_OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}")
+_CLOSE_TAG_RE = re.compile(_CLOSE)
 # Longest text after a "<" that is held back while streaming in case it starts an opening tag
 _MAX_OPEN_TAG_LENGTH = 40
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
@@ -192,10 +198,10 @@ class ToolCallStreamFilter:
                 return output
 
     def finish(self) -> str:
-        """Returns held-back text: a partial tag that never completed, or an unterminated block."""
+        """Returns held-back text: a partial tag that never completed, or an unterminated block that isn't a call."""
         rest = self._open + self._buffer
         self._buffer, self._open, self._close_re = "", "", None
-        return rest
+        return "" if parse_tool_calls(rest)[1] else rest
 
 
 def _partial_tag_length(text: str) -> int:
