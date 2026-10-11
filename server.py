@@ -37,9 +37,10 @@ import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -70,7 +71,12 @@ TIMEOUT = int(os.getenv("OPENSEEK_TIMEOUT", "300"))
 SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
 # Answer opencode's session-title requests locally instead of tying up the browser; "0" sends them to DeepSeek
 LOCAL_TITLES = os.getenv("OPENSEEK_LOCAL_TITLES", "1") != "0"
+# Where opencode sessions and their DeepSeek chats are saved, so they survive a restart
+STATE_FILE = os.getenv("OPENSEEK_STATE_FILE") or (
+    str(Path(USER_DATA_DIR) / "openseek-sessions.json") if USER_DATA_DIR else None
+)
 MAX_CONVERSATIONS = 64
+MAX_SESSIONS = 256
 # DeepSeek's per-message attachment limits
 MAX_FILES = 50
 MAX_FILE_SIZE = 100 * 1024 * 1024
@@ -81,6 +87,11 @@ MIME_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif
 SYSTEM_ROLES = ("system", "developer")
 # Start of opencode's title agent prompt
 TITLE_PROMPT_PREFIX = "You are a title generator"
+# Starts of opencode's compaction prompts, for a first summary and for updating an earlier one
+COMPACTION_PROMPT_PREFIXES = (
+    "You MUST summarize the conversation above into a structured summary",
+    "Update the existing checkpoint in the conversation above",
+)
 MAX_TITLE_LENGTH = 50
 # Seconds between SSE comments sent while a request waits, so clients don't time out a queued request
 KEEPALIVE_INTERVAL = 15
@@ -89,15 +100,45 @@ KEEPALIVE_INTERVAL = 15
 class _Chat(BaseModel):
     chat_id: str
     instructions_hash: str | None
+    # Fingerprints of the messages the chat holds; kept only for sessions
+    keys: list[str] = []
 
 
 class _State:
     deepseek: DeepSeek | None = None
     # Fingerprint of every message in a conversation so far -> the DeepSeek chat holding it
     chats: OrderedDict[str, _Chat] = OrderedDict()
+    # opencode session ID (the x-opencode-session-id header) -> the DeepSeek chat holding the session
+    sessions: OrderedDict[str, _Chat] = OrderedDict()
 
 
 state = _State()
+
+
+def _load_sessions() -> None:
+    if not STATE_FILE:
+        return
+    try:
+        data = json.loads(Path(STATE_FILE).read_text())
+        state.sessions = OrderedDict((key, _Chat(**value)) for key, value in data.items())
+        logger.info("Loaded %d sessions from %s", len(state.sessions), STATE_FILE)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError) as e:
+        logger.warning("Could not load sessions from %s: %s", STATE_FILE, e)
+
+
+def _save_sessions() -> None:
+    if not STATE_FILE:
+        return
+    data = {key: chat.model_dump() for key, chat in state.sessions.items()}
+    try:
+        Path(STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(f"{STATE_FILE}.tmp")
+        temporary.write_text(json.dumps(data))
+        temporary.replace(STATE_FILE)
+    except OSError as e:
+        logger.warning("Could not save sessions to %s: %s", STATE_FILE, e)
 
 
 def _load_default_prompt() -> str:
@@ -118,6 +159,7 @@ async def lifespan(app: FastAPI):
     if not TOKEN and not (EMAIL and PASSWORD):
         logger.error("DEEPSEEK_TOKEN, or DEEPSEEK_EMAIL and DEEPSEEK_PASSWORD, must be set.")
         sys.exit(1)
+    _load_sessions()
     logger.info("Launching DeepSeek browser session...")
     state.deepseek = DeepSeek(
         email=EMAIL, password=PASSWORD, token=TOKEN, headless=True, user_data_dir=USER_DATA_DIR
@@ -306,6 +348,39 @@ def _render_history(messages: list[_Message], tool_names: dict[str, str]) -> str
     )
 
 
+def _match_session(
+    session_id: str, conversation: list[_Message], keys: list[str], history_length: int
+) -> tuple[_Chat | None, list[_Message], bool]:
+    """
+    Finds the DeepSeek chat of an opencode session, and the messages it still needs.
+
+    Returns the chat, the messages after the ones it holds and whether the request is a compaction. The chat is
+    `None`, with the pending turn, when the conversation no longer extends it: after a revert, an edited message, or
+    the summary that starts a compacted conversation. A compaction request repeats only the older part of the
+    conversation, so the chat gets just its prompt.
+    """
+    pending = conversation[history_length:]
+    known = state.sessions.get(session_id)
+    if known is None:
+        return None, pending, False
+    compaction = next(
+        (
+            i
+            for i in range(len(conversation) - 1, history_length - 1, -1)
+            if conversation[i].role == "user"
+            and _to_text(conversation[i].content).startswith(COMPACTION_PROMPT_PREFIXES)
+        ),
+        None,
+    )
+    if compaction is not None:
+        return known, conversation[compaction:], True
+    held = len(known.keys)
+    # Every earlier reply must already be in the chat, so what's left is only new user and tool messages
+    if history_length <= held < len(keys) and keys[:held] == known.keys:
+        return known, conversation[held:], False
+    return None, pending, False
+
+
 def _is_title_request(system: str, history: list[_Message], tools: list[dict] | None) -> bool:
     return LOCAL_TITLES and not tools and not history and system.startswith(TITLE_PROMPT_PREFIX)
 
@@ -361,7 +436,7 @@ def _wants_deepthink(req: _ChatRequest) -> bool:
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: _ChatRequest):
+async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[str | None, Header()] = None):
     ds = state.deepseek
     if ds is None:
         raise HTTPException(status_code=503, detail="Session not ready")
@@ -395,12 +470,15 @@ async def chat_completions(req: _ChatRequest):
         for call in m.tool_calls or []
     }
     keys = [_message_key(m.role, m.content, m.tool_calls, m.tool_call_id) for m in conversation]
-    turn = _render_turn(pending, tool_names)
+    session_id = x_opencode_session_id
+    # Sessions are matched by ID, other clients by the fingerprint of their history
+    if session_id:
+        known, new, compacting = _match_session(session_id, conversation, keys, len(history))
+    else:
+        known, new, compacting = state.chats.pop(_conversation_key(keys[: len(history)]), None), pending, False
 
-    history_key = _conversation_key(keys[: len(history)])
-    known = state.chats.get(history_key)
     # A known chat already holds earlier attachments; a replayed conversation needs all of them again
-    attachments = [a for m in (pending if known else conversation) for a in _attachments(m.content)]
+    attachments = [a for m in (new if known else conversation) for a in _attachments(m.content)]
     if len(attachments) > MAX_FILES:
         raise HTTPException(status_code=400, detail=f"At most {MAX_FILES} attachments are supported")
     directory = tempfile.mkdtemp(prefix="openseek-") if attachments else None
@@ -411,23 +489,37 @@ async def chat_completions(req: _ChatRequest):
         raise
 
     if known:
-        state.chats.pop(history_key, None)
         chat_id = known.chat_id
-        message = turn
+        message = _render_turn(new, tool_names)
         if instructions_hash != known.instructions_hash:
             system_prompt = instructions or None
         else:
             system_prompt = TOOLS_REMINDER if tools else None
-        logger.info("Continuing chat %s (%d new messages)", chat_id, len(pending))
+        if compacting:
+            logger.info("Summarizing session %s in chat %s", session_id, chat_id)
+        else:
+            logger.info("Continuing chat %s (%d new messages)", chat_id, len(new))
     else:
-        await ds.start_new_chat()
         chat_id = None
+        turn = _render_turn(pending, tool_names)
         message = f"{_render_history(history, tool_names)}\n\n{turn}" if history else turn
         system_prompt = instructions or None
         logger.info("New chat (%d earlier messages replayed)", len(history))
 
     def remember(response, content: str, calls: list[dict]) -> None:
+        # The chat stays as it was before a summary; the compacted conversation after it starts a new chat
+        if compacting or not response.chat_id:
+            return
         reply_key = _message_key("assistant", content, calls)
+        if session_id:
+            state.sessions[session_id] = _Chat(
+                chat_id=response.chat_id, instructions_hash=instructions_hash, keys=keys + [reply_key]
+            )
+            state.sessions.move_to_end(session_id)
+            while len(state.sessions) > MAX_SESSIONS:
+                state.sessions.popitem(last=False)
+            _save_sessions()
+            return
         state.chats[_conversation_key(keys + [reply_key])] = _Chat(
             chat_id=response.chat_id, instructions_hash=instructions_hash
         )
@@ -445,6 +537,7 @@ async def chat_completions(req: _ChatRequest):
             chat_id=chat_id,
             system_prompt=system_prompt,
             files=files,
+            new_chat=known is None,
         ),
         directory,
     )

@@ -288,12 +288,16 @@ class DeepSeek:
         chat_id: str | None = None,
         system_prompt: str | None = None,
         files: list[str] | None = None,
+        new_chat: bool = False,
     ) -> AsyncIterator[StreamEvent]:
         """
         Sends a message to DeepSeek and yields the response as it streams.
 
-        Takes the same arguments as `send_message`. Yields "thinking" and "text" deltas, then a final "done"
-        event carrying the complete `Response`. Stops without a "done" event on timeout.
+        Takes the same arguments as `send_message`, plus `new_chat` to start a new chat first. Starting it here, under
+        the same lock as the send, keeps a concurrent request from switching chats in between.
+
+        Yields "thinking" and "text" deltas, then a final "done" event carrying the complete `Response`. Stops without a
+        "done" event on timeout.
 
         Raises:
             FileUploadError: If an attached file is missing, or DeepSeek fails to process it.
@@ -304,7 +308,9 @@ class DeepSeek:
         async with self._lock:
             tab = self.browser.main_tab
 
-            if chat_id is not None and chat_id != self._current_chat_id():
+            if new_chat:
+                await self._open_new_chat()
+            elif chat_id is not None and chat_id != self._current_chat_id():
                 self.logger.debug(f"Switching to chat ID: {chat_id}")
                 await tab.get(f"{BASE_URL}a/chat/s/{chat_id}")
 
@@ -466,10 +472,13 @@ class DeepSeek:
             raise MissingInitialization("Call `initialize()` before starting a new chat.")
 
         async with self._lock:
-            tab = self.browser.main_tab
-            await tab.get(BASE_URL)
-            await tab.wait_for(self.selectors.interactions.textbox, timeout=15)
-            self.logger.debug("New chat started.")
+            await self._open_new_chat()
+
+    async def _open_new_chat(self) -> None:
+        tab = self.browser.main_tab
+        await tab.get(BASE_URL)
+        await tab.wait_for(self.selectors.interactions.textbox, timeout=15)
+        self.logger.debug("New chat started.")
 
     async def close(self) -> None:
         """

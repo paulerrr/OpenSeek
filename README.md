@@ -27,7 +27,7 @@ Streaming, DeepThink reasoning, web search, tool calling and file attachments al
 - 🌐 **Web search.** Send `"search": true` to ground answers in DeepSeek's live search results.
 - 📎 **Attachments.** Images, PDFs, Office documents and code files, up to 50 files per message.
 - ⚡ **Real streaming.** Tokens come from DeepSeek's own response stream, not from scraping the page, so the output is the model's raw Markdown.
-- 💬 **Conversation memory.** Each conversation maps to a DeepSeek chat, and is replayed into a new one if the server restarts.
+- 💬 **Conversation memory.** Each conversation maps to a DeepSeek chat. opencode sessions are tracked by session ID and can be saved across restarts; other conversations are replayed into a new chat after a restart.
 - 🐳 **One-command deploy.** `docker compose up` brings up Chrome, Xvfb and the server.
 
 ## 🚀 Quick start
@@ -127,9 +127,15 @@ Any agent that accepts a custom OpenAI base URL works.
 }
 ```
 
-Setting `limit.context` lets opencode compact long sessions automatically. A compacted session starts a fresh
-DeepSeek chat, which keeps DeepSeek's own chat from getting too long. opencode's session-title requests are answered
-by the server from your first message, without using the browser (`OPENSEEK_LOCAL_TITLES=0` sends them to DeepSeek).
+Each opencode session (and each subagent session) gets its own DeepSeek chat, found by the `x-opencode-session-id`
+header that opencode sends. A turn sends only the messages the chat doesn't have yet. Reverting or editing a message
+replays the conversation into a new chat. Set `OPENSEEK_STATE_FILE` (or `OPENSEEK_USER_DATA_DIR`) to keep sessions
+across server restarts.
+
+Setting `limit.context` lets opencode compact long sessions automatically. The summary is written in the session's
+existing chat, so the long history isn't sent again, and the compacted session then starts a fresh DeepSeek chat,
+which keeps DeepSeek's own chat from getting too long. opencode's session-title requests are answered by the server
+from your first message, without using the browser (`OPENSEEK_LOCAL_TITLES=0` sends them to DeepSeek).
 
 **openclaude:**
 
@@ -255,8 +261,9 @@ flowchart LR
 3. The raw response stream is forwarded to Python through a CDP binding. There, DeepSeek's JSON-patch events are rebuilt into reasoning and answer text.
 4. The server converts that text into OpenAI-format responses, and parses `<tool_call>` blocks into `tool_calls`.
 
-Requests share one browser tab, so they are processed one at a time. Each conversation is matched to its DeepSeek
-chat by a fingerprint of its messages, so a follow-up turn only sends the new messages.
+Requests share one browser tab, so they are processed one at a time. opencode sessions are matched to their DeepSeek
+chat by session ID, and other conversations by a fingerprint of their messages, so a follow-up turn only sends the new
+messages.
 
 ## ⚙️ Configuration
 
@@ -267,6 +274,7 @@ chat by a fingerprint of its messages, so a follow-up turn only sends the new me
 | `OPENSEEK_PORT`               | `8888`  | Server port                                                       |
 | `OPENSEEK_TIMEOUT`            | `300`   | Seconds to wait for a reply                                       |
 | `OPENSEEK_USER_DATA_DIR`      | -       | Persistent Chrome profile directory                               |
+| `OPENSEEK_STATE_FILE`         | `<OPENSEEK_USER_DATA_DIR>/openseek-sessions.json` | File that saves opencode sessions and their DeepSeek chats across restarts |
 | `OPENSEEK_SYSTEM_PROMPT_FILE` | -       | File that replaces the default instructions (an empty file disables them) |
 | `OPENSEEK_LOCAL_TITLES`      | `1`     | Answer opencode's session-title requests locally instead of using the browser; `0` sends them to DeepSeek |
 
