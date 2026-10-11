@@ -20,6 +20,7 @@ Then point openclaude at http://localhost:8888/v1:
 import asyncio
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import logging
@@ -67,6 +68,8 @@ USER_DATA_DIR = os.getenv("OPENSEEK_USER_DATA_DIR") or None
 TIMEOUT = int(os.getenv("OPENSEEK_TIMEOUT", "300"))
 # A file whose contents replace the default instructions; an empty file disables them
 SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
+# Answer opencode's session-title requests locally instead of tying up the browser; "0" sends them to DeepSeek
+LOCAL_TITLES = os.getenv("OPENSEEK_LOCAL_TITLES", "1") != "0"
 MAX_CONVERSATIONS = 64
 # DeepSeek's per-message attachment limits
 MAX_FILES = 50
@@ -76,6 +79,11 @@ DATA_URL_RE = re.compile(r"^data:([^;,]*)((?:;[^;,]*)*),(.*)$", re.DOTALL)
 MIME_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}
 
 SYSTEM_ROLES = ("system", "developer")
+# Start of opencode's title agent prompt
+TITLE_PROMPT_PREFIX = "You are a title generator"
+MAX_TITLE_LENGTH = 50
+# Seconds between SSE comments sent while a request waits, so clients don't time out a queued request
+KEEPALIVE_INTERVAL = 15
 
 
 class _Chat(BaseModel):
@@ -253,9 +261,14 @@ def _hash(value) -> str:
 
 
 def _message_key(role: str, content, tool_calls: list[dict] | None = None, tool_call_id: str | None = None) -> str:
-    """Fingerprint of a message, stable across the client echoing it back."""
+    """
+    Fingerprint of a message, stable across the client echoing it back.
+
+    Whitespace is normalized, since the streamed text a client keeps can differ in blank lines from the parsed
+    content the server remembers.
+    """
     call_ids = [call.get("id") for call in tool_calls or []]
-    return _hash([role, _to_text(content).strip(), call_ids, tool_call_id])
+    return _hash([role, " ".join(_to_text(content).split()), call_ids, tool_call_id])
 
 
 def _conversation_key(keys: list[str]) -> str:
@@ -293,6 +306,53 @@ def _render_history(messages: list[_Message], tool_names: dict[str, str]) -> str
     )
 
 
+def _is_title_request(system: str, history: list[_Message], tools: list[dict] | None) -> bool:
+    return LOCAL_TITLES and not tools and not history and system.startswith(TITLE_PROMPT_PREFIX)
+
+
+def _local_title(text: str) -> str:
+    """A title from the first line of the user's message, cut at a word boundary."""
+    line = next((line for line in text.splitlines() if line.strip()), "")
+    title = " ".join(line.split()).strip(" .,:;!?")
+    if len(title) > MAX_TITLE_LENGTH:
+        title = title[:MAX_TITLE_LENGTH].rsplit(" ", 1)[0].rstrip(" .,:;!?")
+    return title[:1].upper() + title[1:] if title else "New session"
+
+
+def _static_completion(req: _ChatRequest, content: str):
+    """A completion that doesn't go through DeepSeek."""
+    completion_id = f"chatcmpl-openseek-{uuid.uuid4().hex[:24]}"
+    created = int(time.time())
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    if not req.stream:
+        return {
+            "id": completion_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": req.model,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+            "usage": usage,
+        }
+
+    def chunk(delta: dict, finish_reason: str | None = None, **extra) -> str:
+        body = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": req.model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+            **extra,
+        }
+        return f"data: {json.dumps(body)}\n\n"
+
+    async def events():
+        yield chunk({"role": "assistant", "content": content})
+        yield chunk({}, "stop", usage=usage)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 def _wants_deepthink(req: _ChatRequest) -> bool:
     if req.deepthink is not None:
         return req.deepthink
@@ -322,6 +382,11 @@ async def chat_completions(req: _ChatRequest):
         if part
     )
     instructions_hash = _hash(instructions) if instructions else None
+
+    if _is_title_request(system, history, tools):
+        title = _local_title(_render_turn(pending, {}))
+        logger.info("Title request answered locally: %s", title)
+        return _static_completion(req, title)
 
     tool_names = {
         call.get("id"): call.get("function", {}).get("name")
@@ -440,12 +505,17 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
         }
         return f"data: {json.dumps(body)}\n\n"
 
+    def error(message: str, code: int) -> str:
+        return f"data: {json.dumps({'error': {'message': message, 'type': 'server_error', 'code': code}})}\n\n"
+
     yield chunk({"role": "assistant", "content": ""})
     text_filter = ToolCallStreamFilter() if tools else None
     response = None
     try:
-        async for event in stream:
-            if event.type == "thinking":
+        async for event in _with_keepalive(stream):
+            if event is None:
+                yield ": keepalive\n\n"
+            elif event.type == "thinking":
                 yield chunk({"reasoning_content": event.content})
             elif event.type == "text":
                 text = text_filter.feed(event.content) if text_filter else event.content
@@ -453,15 +523,21 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
                     yield chunk({"content": text})
             elif event.type == "done":
                 response = event.response
+    except FileUploadError as e:
+        logger.error("Stream failed: %s", e)
+        yield error(str(e), 400)
+        yield "data: [DONE]\n\n"
+        return
     except OpenSeekException as e:
         logger.error("Stream failed: %s", e)
-        yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'server_error'}})}\n\n"
+        yield error(str(e), 503)
         yield "data: [DONE]\n\n"
         return
 
     if response is None:
         logger.error("Timed out waiting for DeepSeek")
-        yield chunk({}, "length")
+        # An error, not finish_reason "length", so clients retry instead of treating the reply as truncated
+        yield error("Timed out waiting for DeepSeek", 504)
         yield "data: [DONE]\n\n"
         return
 
@@ -483,6 +559,31 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
     logger.info("← streamed %d chars, %d tool calls", len(content), len(calls))
     yield chunk({}, "tool_calls" if calls else "stop", usage=_usage(response))
     yield "data: [DONE]\n\n"
+
+
+async def _with_keepalive(stream):
+    """Passes a stream through, yielding None whenever it has been silent for `KEEPALIVE_INTERVAL` seconds."""
+    iterator = aiter(stream)
+    pending = None
+    try:
+        while True:
+            pending = pending or asyncio.ensure_future(anext(iterator))
+            done, _ = await asyncio.wait({pending}, timeout=KEEPALIVE_INTERVAL)
+            if not done:
+                yield None
+                continue
+            try:
+                event = pending.result()
+            except StopAsyncIteration:
+                return
+            finally:
+                pending = None
+            yield event
+    finally:
+        if pending:
+            pending.cancel()
+            with contextlib.suppress(BaseException):
+                await pending
 
 
 @app.get("/v1/models")

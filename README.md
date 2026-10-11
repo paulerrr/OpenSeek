@@ -99,9 +99,39 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
 - `tools` and `tool_choice` work through a prompt protocol. The tools are described to the model, and the `<tool_call>` blocks it writes (or DeepSeek's native DSML markup) come back as standard `tool_calls`. Send results back as `tool` messages, as usual.
 - Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`), up to 50 files of 100 MB each.
 
+**Streaming behavior**
+
+- While a request waits its turn for the browser, the stream sends a `: keepalive` comment every 15 seconds, so clients don't time it out.
+- Failures arrive as an `{"error": {...}}` event with a status-like `code`: `504` when DeepSeek doesn't answer within `OPENSEEK_TIMEOUT`, `503` when DeepSeek is busy or returns an error, and `400` when an attachment can't be uploaded.
+
 ### Use it with coding agents
 
-Any agent that accepts a custom OpenAI base URL works. For example, with openclaude:
+Any agent that accepts a custom OpenAI base URL works.
+
+**opencode:** add OpenSeek as a provider in `opencode.json`:
+
+```json
+{
+  "provider": {
+    "openseek": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenSeek",
+      "options": { "baseURL": "http://localhost:8888/v1", "apiKey": "dummy" },
+      "models": {
+        "deepseek-chat": { "tool_call": true, "attachment": true, "limit": { "context": 128000, "output": 8192 } },
+        "deepseek-reasoner": { "tool_call": true, "reasoning": true, "attachment": true, "limit": { "context": 128000, "output": 8192 } }
+      }
+    }
+  },
+  "model": "openseek/deepseek-chat"
+}
+```
+
+Setting `limit.context` lets opencode compact long sessions automatically. A compacted session starts a fresh
+DeepSeek chat, which keeps DeepSeek's own chat from getting too long. opencode's session-title requests are answered
+by the server from your first message, without using the browser (`OPENSEEK_LOCAL_TITLES=0` sends them to DeepSeek).
+
+**openclaude:**
 
 ```bash
 bun run profile:init -- --provider openai --model deepseek-chat \
@@ -225,7 +255,8 @@ flowchart LR
 3. The raw response stream is forwarded to Python through a CDP binding. There, DeepSeek's JSON-patch events are rebuilt into reasoning and answer text.
 4. The server converts that text into OpenAI-format responses, and parses `<tool_call>` blocks into `tool_calls`.
 
-Requests share one browser tab, so they are processed one at a time.
+Requests share one browser tab, so they are processed one at a time. Each conversation is matched to its DeepSeek
+chat by a fingerprint of its messages, so a follow-up turn only sends the new messages.
 
 ## ⚙️ Configuration
 
@@ -237,6 +268,7 @@ Requests share one browser tab, so they are processed one at a time.
 | `OPENSEEK_TIMEOUT`            | `300`   | Seconds to wait for a reply                                       |
 | `OPENSEEK_USER_DATA_DIR`      | -       | Persistent Chrome profile directory                               |
 | `OPENSEEK_SYSTEM_PROMPT_FILE` | -       | File that replaces the default instructions (an empty file disables them) |
+| `OPENSEEK_LOCAL_TITLES`      | `1`     | Answer opencode's session-title requests locally instead of using the browser; `0` sends them to DeepSeek |
 
 **Requirements:** Python 3.10+, Chrome or Chromium, and Xvfb on Linux servers without a display (installed automatically in Docker).
 

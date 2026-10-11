@@ -8,6 +8,7 @@ services:
       - DEEPSEEK_PASSWORD=${DEEPSEEK_PASSWORD}
       - DEEPSEEK_TOKEN=${DEEPSEEK_TOKEN}
       - OPENSEEK_PORT=8888
+      - OPENSEEK_LOCAL_TITLES=${OPENSEEK_LOCAL_TITLES:-1}
       # Set only when a prompt file is given; the server then reads it instead of its default prompt
       - OPENSEEK_SYSTEM_PROMPT_FILE=${OPENSEEK_SYSTEM_PROMPT_FILE:+/app/system_prompt.txt}
     volumes:
