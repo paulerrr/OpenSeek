@@ -44,6 +44,8 @@ class ResponseState:
     def __init__(self) -> None:
         self.root: dict = {"response": {"fragments": []}}
         self.message_id: int | None = None
+        # Message of an error hint, such as DeepSeek's rate limit, which replaces the response
+        self.error: str | None = None
         self._path: str | None = None
         self._op: str | None = None
 
@@ -64,6 +66,9 @@ class ResponseState:
 
         if event == "ready":
             self.message_id = payload.get("response_message_id")
+            return []
+        if event == "hint" and isinstance(payload, dict) and payload.get("type") == "error":
+            self.error = str(payload.get("content") or "DeepSeek returned an error")
             return []
         if event is not None or not isinstance(payload, dict) or "v" not in payload:
             return []

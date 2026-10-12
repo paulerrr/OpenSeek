@@ -5,7 +5,7 @@
 **Use the DeepSeek web chat as an OpenAI-compatible API, with no API key needed.**
 
 Point the OpenAI SDK, a coding agent or any OpenAI-style client at `http://localhost:8888/v1`.
-Streaming, DeepThink reasoning, web search, tool calling and file attachments all work.
+Streaming, DeepThink reasoning, web search, deep research, tool calling and file attachments all work.
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -25,6 +25,7 @@ Streaming, DeepThink reasoning, web search, tool calling and file attachments al
 - 🧠 **DeepThink reasoning.** Pick the `deepseek-reasoner` model and the reasoning streams back as `reasoning_content`.
 - 🛠️ **Tool calling.** `tools` / `tool_calls` work, so coding agents can read files, run commands and loop.
 - 🌐 **Web search.** Send `"search": true` to ground answers in DeepSeek's live search results.
+- 🔬 **Deep research.** The `deepseek-research` model plans the research, runs each search step and writes a cited report.
 - 📎 **Attachments.** Images, PDFs, Office documents and code files, up to 50 files per message.
 - ⚡ **Real streaming.** Tokens come from DeepSeek's own response stream, not from scraping the page, so the output is the model's raw Markdown.
 - 💬 **Conversation memory.** Each conversation maps to a DeepSeek chat. opencode sessions are tracked by session ID and can be saved across restarts; other conversations are replayed into a new chat after a restart.
@@ -88,13 +89,21 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
 | Endpoint                    | Description                               |
 |-----------------------------|-------------------------------------------|
 | `POST /v1/chat/completions` | Chat completions, streaming or not        |
-| `GET /v1/models`            | Lists `deepseek-chat` and `deepseek-reasoner` |
+| `GET /v1/models`            | Lists `deepseek-chat`, `deepseek-reasoner` and `deepseek-research` |
 | `GET /health`               | Session status                            |
 
 **Request options**
 
 - `model`: `deepseek-reasoner`, or any name containing `think`, turns on DeepThink. You can also send `"deepthink": true`.
 - `"search": true` turns on DeepSeek's web search for that turn.
+- `deepseek-research`, or any model name containing `research`, runs deep research. You can also send
+  `"deepresearch": true`. DeepSeek's web chat has no research mode of its own (the DeepResearch button some users
+  see comes from the Better DeepSeek extension), so OpenSeek runs the loop itself, in one DeepSeek chat: a turn that
+  writes a research plan, one turn per step (a DeepSeek web search, or a page OpenSeek downloads and attaches) and a
+  turn that writes the report. The plan and each step's findings stream back as `reasoning_content` and the report as
+  `content`. Plans are capped at 6 steps, a failed step is skipped, and tool calling is off for these requests. A run
+  takes several minutes; other requests still get the browser between its turns. DeepThink applies to every turn when
+  it's turned on with `"deepthink": true`.
 - `system` / `developer` messages become a hidden system prompt. It goes into the request payload and is never typed into the chat. It comes after OpenSeek's default instructions (`openseek/internal/prompt.py`), which teach the model the tool-calling, history-replay and attachment formats.
 - `tools` and `tool_choice` work through a prompt protocol. The tools are described to the model, and the `<tool_call>` blocks it writes (or DeepSeek's native DSML markup) come back as standard `tool_calls`. Send results back as `tool` messages, as usual.
 - Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`), up to 50 files of 100 MB each.

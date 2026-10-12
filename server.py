@@ -3,7 +3,8 @@
 OpenSeek server — OpenAI-compatible /v1/chat/completions backed by DeepSeek browser automation.
 
 Supports system prompts, streaming (with DeepThink output as `reasoning_content`), tool calling
-(`tools` / `tool_calls`, implemented through a prompt protocol) and attachments (`image_url` and `file` content parts).
+(`tools` / `tool_calls`, implemented through a prompt protocol), attachments (`image_url` and `file` content parts)
+and deep research (a plan, search steps and a report, run as several DeepSeek turns).
 
 Usage:
     pip install fastapi uvicorn
@@ -48,6 +49,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from openseek import DeepSeek
 from openseek.internal.exceptions import FileUploadError, OpenSeekException
 from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
+from openseek.internal.research import stream_research
 from openseek.internal.tools import (
     TOOLS_REMINDER,
     ToolCallStreamFilter,
@@ -193,9 +195,10 @@ class _ChatRequest(BaseModel):
     temperature: float = 1.0
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
-    # Extensions: force DeepThink / Search regardless of the model name
+    # Extensions: force DeepThink / Search / DeepResearch regardless of the model name
     deepthink: bool | None = None
     search: bool | None = None
+    deepresearch: bool | None = None
 
 
 class _Attachment(BaseModel):
@@ -441,6 +444,12 @@ def _wants_deepthink(req: _ChatRequest) -> bool:
     return "reasoner" in model or "think" in model
 
 
+def _wants_deepresearch(req: _ChatRequest) -> bool:
+    if req.deepresearch is not None:
+        return req.deepresearch
+    return "research" in req.model.lower()
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[str | None, Header()] = None):
     ds = state.deepseek
@@ -456,7 +465,9 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
     if not pending:
         raise HTTPException(status_code=400, detail="The last message must be a user or tool message")
 
-    tools = req.tools if req.tools and req.tool_choice != "none" else None
+    research = _wants_deepresearch(req)
+    # A research run answers with a report, so tool calling is off for it
+    tools = req.tools if req.tools and req.tool_choice != "none" and not research else None
     instructions = "\n\n".join(
         part
         for part in (DEFAULT_PROMPT, system, build_tools_prompt(tools, req.tool_choice) if tools else "")
@@ -534,8 +545,20 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
 
     if files:
         logger.info("Attaching %d files", len(files))
-    stream = _remove_after(
-        ds.stream_message(
+    if research:
+        logger.info("Starting deep research")
+        stream = stream_research(
+            ds,
+            message,
+            deepthink=_wants_deepthink(req),
+            timeout=TIMEOUT,
+            chat_id=chat_id,
+            new_chat=known is None,
+            system_prompt=system_prompt,
+            files=files,
+        )
+    else:
+        stream = ds.stream_message(
             message,
             deepthink=_wants_deepthink(req),
             search=bool(req.search),
@@ -544,9 +567,8 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
             system_prompt=system_prompt,
             files=files,
             new_chat=known is None,
-        ),
-        directory,
-    )
+        )
+    stream = _remove_after(stream, directory)
     completion_id = f"chatcmpl-openseek-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
 
@@ -693,7 +715,7 @@ async def list_models():
         "object": "list",
         "data": [
             {"id": model, "object": "model", "created": 0, "owned_by": "openseek"}
-            for model in ("deepseek-chat", "deepseek-reasoner")
+            for model in ("deepseek-chat", "deepseek-reasoner", "deepseek-research")
         ],
     }
 

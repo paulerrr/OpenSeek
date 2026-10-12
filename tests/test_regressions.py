@@ -1,11 +1,14 @@
 import json
 import unittest
+import unittest.mock
 from collections import OrderedDict
 
 import server
 from openseek import DeepSeek
+from openseek.internal import research
 from openseek.internal.exceptions import ServerDown
 from openseek.internal.objects import Response, StreamEvent
+from openseek.internal.research import parse_plan
 from openseek.internal.stream import ResponseState
 
 
@@ -122,6 +125,108 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ServerDown):
                 ds._build_response(state, '', status, 'chat')
         self.assertEqual(ds._build_response(state, '', 200, 'chat').text, 'partial')
+
+
+class FakeDeepSeek:
+    """Answers each turn from a list of replies (a string, an exception, or None for a timeout), recording calls."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    async def stream_message(self, message, **kwargs):
+        self.calls.append((message, kwargs))
+        reply = self.replies.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply
+        if reply is None:
+            return
+        yield StreamEvent('thinking', 'hmm ')
+        yield StreamEvent('text', reply)
+        yield StreamEvent('done', response=Response(text=reply, chat_id='chat', search_results=[{'url': 'u'}]))
+
+
+class ResearchTests(unittest.IsolatedAsyncioTestCase):
+    def test_parse_plan(self):
+        plan = ('Plan:\n<research_plan>{"title": "RAM", "steps": ['
+                '{"action": "search", "query": "DDR5 prices October 2026", "purpose": "current"},'
+                '{"action": "fetch", "query": "https://example.com/ram"},'
+                '{"action": "fetch", "query": "not a url"},'
+                '{"action": "search", "query": ""}, "junk"]}</research_plan>')
+        title, steps = parse_plan(plan)
+        self.assertEqual(title, 'RAM')
+        self.assertEqual([(s['action'], s['query']) for s in steps], [
+            ('search', 'DDR5 prices October 2026'), ('fetch', 'https://example.com/ram'), ('search', 'not a url')])
+        many = '```json\n{"steps": [' + '{"query": "q"},' * 9 + '{"query": "q"}]}\n```'
+        self.assertEqual(len(parse_plan(many)[1]), 6)
+        self.assertEqual(parse_plan('No plan here'), ('', []))
+
+    async def test_research_runs_plan_steps_and_report(self):
+        plan = ('<research_plan>{"title": "T", "steps": [{"action": "search", "query": "q1"},'
+                '{"action": "fetch", "query": "https://example.com"}, {"action": "search", "query": "q3"}]}'
+                '</research_plan>')
+        ds = FakeDeepSeek([plan, 'found 1', 'found 2', ServerDown('busy'), 'The report'])
+        with unittest.mock.patch.object(research, '_fetch_page', return_value='page text'):
+            events = [e async for e in research.stream_research(
+                ds, 'ram prices', chat_id=None, new_chat=True, system_prompt='sys', files=['a.png'])]
+
+        first, search, fetch, failed, report = [kwargs for _, kwargs in ds.calls]
+        self.assertEqual((first['new_chat'], first['system_prompt'], first['files']), (True, 'sys', ['a.png']))
+        self.assertTrue(search['search'])
+        self.assertEqual(search['chat_id'], 'chat')
+        self.assertNotIn('search', fetch)
+        self.assertEqual(len(fetch['files']), 1)
+        self.assertIn('Steps 3 failed', ds.calls[-1][0])
+        self.assertNotIn('files', report)
+
+        text = ''.join(e.content for e in events if e.type == 'text')
+        self.assertEqual(text, 'The report')
+        streamed = ''.join(e.content for e in events if e.type == 'thinking')
+        self.assertIn('found 1', streamed)
+        self.assertIn('found 2', streamed)
+        done = events[-1].response
+        self.assertEqual((done.text, done.chat_id), ('The report', 'chat'))
+        self.assertIn('found 2', done.deepthink_content)
+        self.assertNotIn('The report', done.deepthink_content)
+        self.assertEqual(len(done.search_results), 3)
+
+    async def test_research_falls_back_without_plan_and_stops_on_timeout(self):
+        ds = FakeDeepSeek(['I cannot plan', 'found', None])
+        events = [e async for e in research.stream_research(ds, 'question')]
+        self.assertEqual(ds.calls[1][1]['search'], True)
+        self.assertIn('question', ds.calls[1][0])
+        self.assertFalse(any(e.type == 'done' for e in events))
+
+    async def test_research_retries_rate_limited_turns(self):
+        too_frequent = ServerDown('DeepSeek returned an error: Messages too frequent. Try again later.')
+        plan = '<research_plan>{"steps": [{"action": "search", "query": "q1"}]}</research_plan>'
+        ds = FakeDeepSeek([too_frequent, plan, too_frequent, 'found', 'Report'])
+        with unittest.mock.patch.object(research, 'RATE_LIMIT_DELAYS', (0, 0)):
+            events = [e async for e in research.stream_research(ds, 'question', new_chat=True)]
+        self.assertEqual(len(ds.calls), 5)
+        self.assertTrue(ds.calls[1][1]['new_chat'])
+        self.assertEqual(events[-1].response.text, 'Report')
+        self.assertIn('found', events[-1].response.deepthink_content)
+
+        ds = FakeDeepSeek([plan, 'found', too_frequent, too_frequent, too_frequent])
+        with unittest.mock.patch.object(research, 'RATE_LIMIT_DELAYS', (0, 0)), self.assertRaises(ServerDown):
+            [e async for e in research.stream_research(ds, 'question')]
+
+    def test_error_hint_fails_the_response(self):
+        state = ResponseState()
+        state.feed(None, json.dumps({'v': {'response': {'fragments': [{'type': 'SEARCH', 'content': None}]}}}))
+        state.feed('hint', json.dumps({'type': 'error', 'content': 'Messages too frequent. Try again later.'}))
+        with self.assertRaisesRegex(ServerDown, 'too frequent'):
+            DeepSeek(token='test')._build_response(state, '', 200, 'chat')
+
+    def test_research_model_selection(self):
+        def request(**kwargs):
+            return server._ChatRequest(messages=[], **kwargs)
+
+        self.assertTrue(server._wants_deepresearch(request(model='deepseek-research')))
+        self.assertFalse(server._wants_deepresearch(request(model='deepseek-research', deepresearch=False)))
+        self.assertTrue(server._wants_deepresearch(request(model='deepseek-chat', deepresearch=True)))
+        self.assertFalse(server._wants_deepresearch(request(model='deepseek-chat')))
 
 
 if __name__ == '__main__':

@@ -438,6 +438,8 @@ class DeepSeek:
     def _build_response(self, state: ResponseState, raw: str, status: int | None, chat_id: str | None) -> Response:
         if status is None or not 200 <= status < 300:
             raise ServerDown(f"DeepSeek request failed (HTTP {status})")
+        if state.error:
+            raise ServerDown(f"DeepSeek returned an error: {state.error}")
         if not state.fragments:
             # Errors come back as a plain JSON body instead of an event stream
             detail = raw.strip()
