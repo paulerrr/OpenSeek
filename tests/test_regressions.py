@@ -145,6 +145,12 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call['name'], 'grep')
         self.assertEqual(json.loads(call['arguments']), {'pattern': 'def |class ', 'limit': 150})
 
+    async def test_dsml_arguments_parameter_is_unwrapped(self):
+        text = ('<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="shell">\n<｜｜DSML｜｜ parameter name="arguments" '
+                'string="false">{"command": "uname -a"}</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+        _, remembered, _ = await self.collect(text)
+        self.assertEqual(json.loads(remembered[0][2][0]['function']['arguments']), {'command': 'uname -a'})
+
     async def test_transport_failure_never_remembers_or_finishes_successfully(self):
         ds = DeepSeek(token='test')
         ds._events.put_nowait({'kind': 'chunk', 'data': 'data: ' + json.dumps({

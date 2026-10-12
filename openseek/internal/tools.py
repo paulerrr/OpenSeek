@@ -217,6 +217,9 @@ def _parse_dsml_calls(body: str) -> list[dict]:
                     arguments[key] = json.loads(value)
                 except json.JSONDecodeError:
                     arguments[key] = value
+        # The model sometimes passes the whole arguments object as one parameter named "arguments"
+        if list(arguments) == ["arguments"] and isinstance(arguments["arguments"], dict):
+            arguments = arguments["arguments"]
         calls.append(_make_call(name, arguments))
     return calls
 
