@@ -475,7 +475,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
     )
     instructions_hash = _hash(instructions) if instructions else None
     # Bare JSON calls without tags are accepted only for these names
-    tool_names = {tool.get("function", tool).get("name") for tool in tools} if tools else None
+    request_tools = {tool.get("function", tool).get("name") for tool in tools} if tools else None
 
     if _is_title_request(system, history, tools):
         title = _local_title(_render_turn(pending, {}))
@@ -576,7 +576,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
 
     if req.stream:
         return StreamingResponse(
-            _stream_completion(stream, completion_id, created, req.model, tool_names, remember),
+            _stream_completion(stream, completion_id, created, req.model, request_tools, remember),
             media_type="text/event-stream",
         )
 
@@ -592,7 +592,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
     if response is None:
         raise HTTPException(status_code=504, detail="Timed out waiting for DeepSeek")
 
-    content, calls = parse_tool_calls(response.text, tool_names) if tools else (response.text, [])
+    content, calls = parse_tool_calls(response.text, request_tools) if tools else (response.text, [])
     remember(response, content, calls)
     logger.info("← %d chars, %d tool calls", len(content), len(calls))
 

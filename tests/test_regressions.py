@@ -168,6 +168,30 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ds._build_response(state, '', 200, 'chat').text, 'partial')
 
 
+class EndpointTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.previous = server.state.deepseek, server.state.chats
+        server.state.chats = OrderedDict()
+
+    def tearDown(self):
+        server.state.deepseek, server.state.chats = self.previous
+
+    async def complete(self, reply, tools):
+        server.state.deepseek = FakeDeepSeek([reply])
+        tool = {'type': 'function', 'function': {'name': 'shell', 'parameters': {}}}
+        req = server._ChatRequest(model='deepseek-chat', messages=[{'role': 'user', 'content': 'go'}],
+                                  tools=[tool] if tools else None)
+        return (await server.chat_completions(req))['choices'][0]
+
+    async def test_bare_call_reaches_the_client(self):
+        reply = 'Checking.\n{"name": "shell", "arguments": {"command": "ls"}}'
+        choice = await self.complete(reply, tools=True)
+        self.assertEqual(choice['finish_reason'], 'tool_calls')
+        self.assertEqual(choice['message']['tool_calls'][0]['function']['arguments'], '{"command": "ls"}')
+        choice = await self.complete(reply, tools=False)
+        self.assertEqual(choice['message']['content'], reply)
+
+
 class FakeDeepSeek:
     """Answers each turn from a list of replies (a string, an exception, or None for a timeout), recording calls."""
 
