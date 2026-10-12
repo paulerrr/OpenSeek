@@ -474,6 +474,8 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
         if part
     )
     instructions_hash = _hash(instructions) if instructions else None
+    # Bare JSON calls without tags are accepted only for these names
+    tool_names = {tool.get("function", tool).get("name") for tool in tools} if tools else None
 
     if _is_title_request(system, history, tools):
         title = _local_title(_render_turn(pending, {}))
@@ -574,7 +576,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
 
     if req.stream:
         return StreamingResponse(
-            _stream_completion(stream, completion_id, created, req.model, bool(tools), remember),
+            _stream_completion(stream, completion_id, created, req.model, tool_names, remember),
             media_type="text/event-stream",
         )
 
@@ -590,7 +592,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
     if response is None:
         raise HTTPException(status_code=504, detail="Timed out waiting for DeepSeek")
 
-    content, calls = parse_tool_calls(response.text) if tools else (response.text, [])
+    content, calls = parse_tool_calls(response.text, tool_names) if tools else (response.text, [])
     remember(response, content, calls)
     logger.info("← %d chars, %d tool calls", len(content), len(calls))
 
@@ -614,7 +616,7 @@ def _usage(response) -> dict:
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": response.token_usage or 0}
 
 
-async def _stream_completion(stream, completion_id: str, created: int, model: str, tools: bool, remember):
+async def _stream_completion(stream, completion_id: str, created: int, model: str, tool_names, remember):
     def chunk(delta: dict, finish_reason: str | None = None, **extra) -> str:
         body = {
             "id": completion_id,
@@ -630,7 +632,8 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
         return f"data: {json.dumps({'error': {'message': message, 'type': 'server_error', 'code': code}})}\n\n"
 
     yield chunk({"role": "assistant", "content": ""})
-    text_filter = ToolCallStreamFilter() if tools else None
+    # None when the request has no tools; a (possibly empty) set of names otherwise
+    text_filter = ToolCallStreamFilter(tool_names) if tool_names is not None else None
     emitted_text = []
     response = None
     try:
@@ -668,7 +671,7 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
     content = response.text
     if text_filter:
         rest = text_filter.finish()
-        content, calls = parse_tool_calls(response.text)
+        content, calls = parse_tool_calls(response.text, tool_names)
         if rest:
             emitted_text.append(rest)
             yield chunk({"content": rest})

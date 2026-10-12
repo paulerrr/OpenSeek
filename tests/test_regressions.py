@@ -10,6 +10,7 @@ from openseek.internal.exceptions import ServerDown
 from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import parse_plan
 from openseek.internal.stream import ResponseState
+from openseek.internal.tools import parse_tool_calls
 
 
 class SessionTests(unittest.TestCase):
@@ -51,6 +52,9 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(server._match_session('s', messages, keys(), 2)[2])
 
 
+TOOL_NAMES = {'read', 'grep', 'shell'}
+
+
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def collect(self, text, tools=True):
         async def events():
@@ -60,7 +64,8 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
 
         remembered = []
         chunks = [part async for part in server._stream_completion(
-            events(), 'id', 0, 'deepseek-chat', tools, lambda *args: remembered.append(args))]
+            events(), 'id', 0, 'deepseek-chat', TOOL_NAMES if tools else None,
+            lambda *args: remembered.append(args))]
         payloads = [json.loads(part[6:]) for part in chunks if part.startswith('data: {')]
         content = ''.join(p['choices'][0]['delta'].get('content', '') for p in payloads)
         return content, remembered, payloads
@@ -92,6 +97,42 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         paths = [json.loads(call['function']['arguments'])['path'] for call in remembered[0][2]]
         self.assertEqual(paths, ['a', 'b', 'c', 'd'])
         self.assertEqual(payloads[-1]['choices'][0]['finish_reason'], 'tool_calls')
+
+    async def test_bare_json_calls(self):
+        shell = '{"name": "shell", "arguments": {"command": "echo %s"}}'
+        text = ('Let me look.\n\n' + shell % 'a' + '\nPowerShell needs another form.\n\n  ' + shell % 'b'
+                + '\n' + shell % 'c')
+        content, remembered, payloads = await self.collect(text)
+        self.assertEqual(content, 'Let me look.\n\n\nPowerShell needs another form.\n\n\n')
+        commands = [json.loads(call['function']['arguments'])['command'] for call in remembered[0][2]]
+        self.assertEqual(commands, ['echo a', 'echo b', 'echo c'])
+        self.assertEqual(payloads[-1]['choices'][0]['finish_reason'], 'tool_calls')
+        self.assertEqual(parse_tool_calls(text, TOOL_NAMES)[0], 'Let me look.\n\nPowerShell needs another form.')
+
+    async def test_bare_json_that_is_not_a_call_stays_text(self):
+        for text in ['Example:\n```json\n{"name": "shell", "arguments": {}}\n```\nDone.',
+                     '{"name": "delete_everything", "arguments": {}}',
+                     'Inline {"name": "shell", "arguments": {}} mention',
+                     '{"name": "shell", "arguments": {}} trailing words',
+                     '{"name": "shell", "arguments": {"command": "unfinished',
+                     '{"name": "shell"}',
+                     '{"named": 1}\n{ not json }\n{',
+                     '<tool_call>bad</tool_call> {"name": "shell", "arguments": {}}']:
+            content, remembered, _ = await self.collect(text)
+            self.assertEqual(content, text)
+            self.assertEqual(remembered[0][2], [])
+            self.assertEqual(parse_tool_calls(text, TOOL_NAMES)[1], [])
+        content, remembered, _ = await self.collect('{"name": "shell", "arguments": {}}', tools=False)
+        self.assertEqual(remembered[0][2], [])
+
+    async def test_mixed_tagged_and_bare_calls_keep_order(self):
+        text = ('<tool_call>{"name": "read", "arguments": {"path": "a"}}</tool_call>\n'
+                '{"name": "grep", "arguments": {"pattern": "b"}}\n'
+                '<tool_call>{"name": "read", "arguments": {"path": "c"}}</tool_call>')
+        _, remembered, _ = await self.collect(text)
+        self.assertEqual([call['function']['name'] for call in remembered[0][2]], ['read', 'grep', 'read'])
+        self.assertEqual([call['function']['name'] for call in parse_tool_calls(text, TOOL_NAMES)[1]],
+                         ['read', 'grep', 'read'])
 
     async def test_dsml_without_inner_delimiters(self):
         text = ('Searching.\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="grep">\n'

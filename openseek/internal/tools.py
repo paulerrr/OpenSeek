@@ -3,7 +3,9 @@ Prompt-based tool calling, modeled on Better DeepSeek's tag protocol.
 
 DeepSeek's web chat has no native function calling, so the tool definitions go into the hidden system prompt
 and the model is asked to emit `<tool_call>` blocks, which are parsed back into OpenAI-style tool calls.
-The model sometimes falls back to DeepSeek's native DSML markup instead, so those blocks are accepted too.
+The model sometimes falls back to DeepSeek's native DSML markup instead, so those blocks are accepted too, and so are
+bare `{"name": ..., "arguments": ...}` objects written on their own line without tags, when the name is one of the
+request's tools and the object isn't inside a code fence.
 """
 
 import json
@@ -37,6 +39,9 @@ _CLOSE_TAG_RE = re.compile(_CLOSE)
 # Longest text after a "<" that is held back while streaming in case it starts an opening tag
 _MAX_OPEN_TAG_LENGTH = 40
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+# A bare call is a JSON object that starts with its "name" key
+_BARE_START_RE = re.compile(r'\{\s*"name"\s*:')
+_INCOMPLETE = object()
 
 TOOLS_REMINDER = (
     f"Reminder: call tools only with {OPEN_TAG}{{\"name\": ..., \"arguments\": {{...}}}}{CLOSE_TAG} blocks, then stop "
@@ -84,26 +89,108 @@ Available tools (JSON):
 {json.dumps(definitions, indent=2)}"""
 
 
-def parse_tool_calls(text: str) -> tuple[str, list[dict]]:
+def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
     """
     Splits a reply into its text content and OpenAI-style tool calls.
 
-    Blocks that don't contain a valid call are left in the text.
+    Blocks that don't contain a valid call are left in the text. Bare JSON calls are accepted only for `tool_names`.
     """
-    calls = []
-
-    def replace(match: re.Match) -> str:
+    spans = []
+    for match in BLOCK_RE.finditer(text):
         if match.group("json") is not None:
             block_calls = [_parse_call(match.group("json"))]
         else:
             block_calls = _parse_dsml_calls(match.group("dsml"))
-        if not block_calls or None in block_calls:
-            return match.group(0)
-        calls.extend(block_calls)
-        return ""
+        valid = bool(block_calls) and None not in block_calls
+        spans.append((match.start(), match.end(), block_calls if valid else None))
+    if tool_names:
+        spans += _bare_call_spans(text, [(start, end) for start, end, _ in spans], tool_names)
+    spans.sort(key=lambda span: span[0])
 
-    content = re.sub(r"\n{3,}", "\n\n", BLOCK_RE.sub(replace, text))
+    calls, parts, position = [], [], 0
+    for start, end, span_calls in spans:
+        if span_calls is None:
+            continue
+        parts.append(text[position:start])
+        calls.extend(span_calls)
+        position = end
+    parts.append(text[position:])
+    content = re.sub(r"\n{3,}", "\n\n", "".join(parts))
     return content.strip(), calls
+
+
+def _bare_call_spans(text: str, blocks: list[tuple[int, int]], tool_names) -> list[tuple[int, int, list[dict]]]:
+    """Finds bare JSON calls at the start of lines outside tag blocks and code fences."""
+    spans, in_fence, line_start = [], False, 0
+    while line_start <= len(text):
+        block = next(((start, end) for start, end in blocks if start <= line_start < end), None)
+        if block:
+            # Text after a block on its last line is skipped, as the stream filter only checks line starts
+            line_start = text.find("\n", block[1])
+            line_start = len(text) + 1 if line_start == -1 else line_start + 1
+            continue
+        line_end = text.find("\n", line_start)
+        line_end = len(text) if line_end == -1 else line_end
+        line = text[line_start:line_end]
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and line.lstrip(" \t").startswith("{"):
+            brace = line_start + len(line) - len(line.lstrip(" \t"))
+            found = _match_bare_call(text, brace, tool_names, final=True)
+            if found and not any(brace < end and start < found[0] for start, end in blocks):
+                spans.append((brace, found[0], [found[1]]))
+                line_end = text.find("\n", found[0])
+                line_end = len(text) if line_end == -1 else line_end
+        line_start = line_end + 1
+    return spans
+
+
+def _match_bare_call(text: str, start: int, tool_names, final: bool):
+    """
+    Checks for a bare call whose object starts at `start` and ends its line.
+
+    Returns (end, call), None when the text isn't a call, or `_INCOMPLETE` when more text is needed to decide.
+    """
+    if not _BARE_START_RE.match(text, start):
+        return None
+    end = _object_end(text, start)
+    if end is None:
+        return None if final else _INCOMPLETE
+    newline = text.find("\n", end)
+    if newline == -1 and not final:
+        return _INCOMPLETE
+    if text[end : len(text) if newline == -1 else newline].strip():
+        return None
+    try:
+        data = json.loads(text[start:end])
+    except json.JSONDecodeError:
+        return None
+    if data.get("name") not in tool_names or not isinstance(data.get("arguments"), (dict, str)):
+        return None
+    return end, _make_call(data["name"], data["arguments"])
+
+
+def _object_end(text: str, start: int) -> int | None:
+    """Index just past the brace that closes the object starting at `start`, or None if it doesn't close."""
+    depth, in_string, escaped = 0, False, False
+    for i in range(start, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
 
 
 def _parse_call(body: str) -> dict | None:
@@ -163,13 +250,20 @@ class ToolCallStreamFilter:
     """
     Removes tool call blocks from streamed text, so only plain content is forwarded while streaming.
 
-    Text that might be the start of an opening tag is held back until it can be decided.
+    Text that might be the start of an opening tag, or of a bare call for one of `tool_names`, is held back until it
+    can be decided.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, tool_names=None) -> None:
+        self._tool_names = tool_names
         self._buffer = ""
         self._open = ""
         self._close_re: re.Pattern | None = None
+        # The current line outside tag blocks, and whether it is inside a code fence, for spotting bare calls
+        self._line = ""
+        self._in_fence = False
+        # After a tag block, the rest of its line is never checked for a bare call, matching parse_tool_calls
+        self._after_block = False
 
     def feed(self, text: str) -> str:
         self._buffer += text
@@ -184,24 +278,76 @@ class ToolCallStreamFilter:
                     output += block
                 self._buffer = self._buffer[end.end() :]
                 self._open, self._close_re = "", None
-            else:
-                start = _OPEN_RE.search(self._buffer)
-                if start:
-                    output += self._buffer[: start.start()]
-                    self._buffer = self._buffer[start.end() :]
-                    self._open = start.group(0)
-                    self._close_re = _CLOSE_TAG_RE if self._open == OPEN_TAG else _DSML_CLOSE_RE
-                    continue
-                hold = _partial_tag_length(self._buffer)
-                output += self._buffer[: len(self._buffer) - hold]
-                self._buffer = self._buffer[len(self._buffer) - hold :]
+                self._after_block = True
+                continue
+            bare = self._bare_call()
+            if bare is _INCOMPLETE:
                 return output
+            if bare:
+                # Drops the call along with the line's indentation
+                self._buffer = self._buffer[bare[0] :]
+                self._after_block = True
+                continue
+            start = _OPEN_RE.search(self._buffer)
+            newline = self._buffer.find("\n")
+            if start and (newline == -1 or start.start() < newline):
+                output += self._emit(self._buffer[: start.start()])
+                self._buffer = self._buffer[start.end() :]
+                self._open = start.group(0)
+                self._close_re = _CLOSE_TAG_RE if self._open == OPEN_TAG else _DSML_CLOSE_RE
+                continue
+            if newline != -1:
+                # Lines are passed one at a time, so the start of the next one can be checked for a bare call
+                output += self._emit(self._buffer[: newline + 1])
+                self._buffer = self._buffer[newline + 1 :]
+                continue
+            hold = max(_partial_tag_length(self._buffer), self._partial_bare_length())
+            output += self._emit(self._buffer[: len(self._buffer) - hold])
+            self._buffer = self._buffer[len(self._buffer) - hold :]
+            return output
 
     def finish(self) -> str:
         """Returns held-back text: a partial tag that never completed, or an unterminated block that isn't a call."""
         rest = self._open + self._buffer
+        bare = None if self._open else self._bare_call(final=True)
         self._buffer, self._open, self._close_re = "", "", None
+        if bare:
+            return ""
         return "" if parse_tool_calls(rest)[1] else rest
+
+    def _emit(self, text: str) -> str:
+        """Tracks the current line and code fences in text passed through outside tag blocks."""
+        self._line += text
+        while "\n" in self._line:
+            line, self._line = self._line.split("\n", 1)
+            self._after_block = False
+            if line.lstrip().startswith("```"):
+                self._in_fence = not self._in_fence
+        return text
+
+    def _at_line_start(self) -> bool:
+        return bool(self._tool_names) and not self._in_fence and not self._after_block and not self._line.strip(" \t")
+
+    def _bare_call(self, final: bool = False):
+        """Checks whether the buffer, at the start of a line outside code fences, begins with a bare call."""
+        if not self._at_line_start():
+            return None
+        indent = len(self._buffer) - len(self._buffer.lstrip(" \t"))
+        if indent == len(self._buffer) or self._buffer[indent] != "{":
+            return None
+        return _match_bare_call(self._buffer, indent, self._tool_names, final)
+
+    def _partial_bare_length(self) -> int:
+        """Length of trailing text that might still become the start of a bare call."""
+        if not self._at_line_start():
+            return 0
+        candidate = self._buffer.lstrip(" \t")
+        if not candidate:
+            return len(self._buffer)
+        rest = candidate[1:].lstrip()
+        if candidate[0] == "{" and ('"name"'.startswith(rest) or (rest.startswith('"name"') and not rest[6:].strip())):
+            return len(self._buffer)
+        return 0
 
 
 def _partial_tag_length(text: str) -> int:
