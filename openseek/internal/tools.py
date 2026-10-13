@@ -12,6 +12,8 @@ import json
 import re
 import uuid
 
+from .exceptions import ServerDown
+
 OPEN_TAG = "<tool_call>"
 CLOSE_TAG = "</tool_call>"
 # DeepSeek's native markup: <｜DSML｜function_calls><｜DSML｜invoke name="..."><｜DSML｜parameter name="..." string="true">
@@ -51,6 +53,66 @@ _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 # A bare call is a JSON object that starts with its "name" key
 _BARE_START_RE = re.compile(r'\{\s*"name"\s*:')
 _INCOMPLETE = object()
+
+_NAMELESS_PARAMETER_RE = re.compile(rf'<{_DSML}parameter\s*>')
+
+
+class ToolOutputGuard:
+    """Hold nameless parameter runs until they resolve; reject four consecutive tags.
+
+    This is deliberately narrow: ordinary malformed text and fenced examples remain
+    text. Chunk boundaries must not change whether a runaway response is detected.
+    """
+
+    def __init__(self):
+        self.buffer = ""
+        self.pending = ""
+        self.count = 0
+        self.line = ""
+        self.in_fence = False
+
+    def _emit(self, text):
+        self.line += text
+        while "\n" in self.line:
+            line, self.line = self.line.split("\n", 1)
+            if line.lstrip().startswith(("```", "~~~")):
+                self.in_fence = not self.in_fence
+        return text
+
+    def feed(self, text):
+        self.buffer += text
+        output = []
+        while self.buffer:
+            match = _NAMELESS_PARAMETER_RE.search(self.buffer)
+            newline = self.buffer.find("\n")
+            if match and not self.in_fence and (newline < 0 or match.start() < newline):
+                before = self.buffer[:match.start()]
+                if before.strip():
+                    output.append(self._emit(self.pending + before))
+                    self.pending, self.count = "", 0
+                else:
+                    self.pending += before
+                self.pending += match.group()
+                self.count += 1
+                if self.count >= 4:
+                    raise ServerDown("DeepSeek generated repeated malformed DSML parameter tags; retry the request.")
+                self.buffer = self.buffer[match.end():]
+                continue
+            end = newline + 1 if newline >= 0 else len(self.buffer) - _partial_tag_length(self.buffer)
+            if not end:
+                break
+            part, self.buffer = self.buffer[:end], self.buffer[end:]
+            if self.pending and not part.strip():
+                self.pending += part
+            else:
+                output.append(self._emit(self.pending + part))
+                self.pending, self.count = "", 0
+        return "".join(output)
+
+    def finish(self):
+        rest = self.pending + self.buffer
+        self.pending, self.buffer, self.count = "", "", 0
+        return rest
 
 TOOLS_REMINDER = (
     f"Reminder: call tools only with {OPEN_TAG}{{\"name\": ..., \"arguments\": {{...}}}}{CLOSE_TAG} blocks, then stop "
@@ -234,8 +296,13 @@ def _parse_call(body: str) -> dict | None:
 def _parse_dsml_calls(body: str) -> list[dict]:
     calls = []
     for name, invoke_body in _INVOKE_RE.findall(body):
+        # Never turn unparsed or nested parameter markup into an empty/partial call.
+        if _PARAMETER_RE.sub("", invoke_body).strip():
+            return []
         arguments = {}
         for key, is_string, value in _PARAMETER_RE.findall(invoke_body):
+            if key in arguments or re.search(rf'</?{_DSML}', value):
+                return []
             if is_string == "true":
                 arguments[key] = value
             else:

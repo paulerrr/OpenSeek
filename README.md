@@ -285,6 +285,13 @@ Malformed tool-call blocks remain ordinary text in their original position. Inte
 return an error (an SSE error event when streaming), rather than a successful partial answer, and are not recorded
 as completed turns.
 
+For requests with tools, four consecutive nameless DSML parameter tags are treated as runaway output.
+The tags are held back from the client, and the request ends with a retryable 503 error (an SSE error event when
+streaming). OpenSeek closes the response stream, reloads the browser page, and drops the affected session mapping
+so the next request replays the client's history into a fresh chat. It does not retry automatically. Short malformed
+snippets and fenced examples remain text. DSML invocations with unparsed or duplicate parameters are not executed
+as empty or partial tool calls.
+
 ### Regression tests
 
 With the server dependencies installed, run `python -m unittest discover -s tests -v`.

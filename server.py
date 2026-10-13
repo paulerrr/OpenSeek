@@ -49,10 +49,12 @@ sys.path.insert(0, os.path.dirname(__file__))
 from openseek import DeepSeek
 from openseek.internal.exceptions import FileUploadError, OpenSeekException
 from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
+from openseek.internal.objects import StreamEvent
 from openseek.internal.research import stream_research
 from openseek.internal.tools import (
     TOOLS_REMINDER,
     ToolCallStreamFilter,
+    ToolOutputGuard,
     build_tools_prompt,
     format_tool_call,
     format_tool_result,
@@ -296,8 +298,32 @@ async def _remove_after(stream, directory: str | None):
         async for event in stream:
             yield event
     finally:
-        if directory:
-            shutil.rmtree(directory, ignore_errors=True)
+        try:
+            await stream.aclose()
+        finally:
+            if directory:
+                shutil.rmtree(directory, ignore_errors=True)
+
+
+async def _guard_tool_output(stream, forget=lambda: None):
+    guard = ToolOutputGuard()
+    try:
+        async for event in stream:
+            if event.type == "text":
+                text = guard.feed(event.content)
+                if text:
+                    yield StreamEvent("text", text)
+            else:
+                if event.type == "done":
+                    rest = guard.finish()
+                    if rest:
+                        yield StreamEvent("text", rest)
+                yield event
+    except OpenSeekException:
+        forget()
+        raise
+    finally:
+        await stream.aclose()
 
 
 def _hash(value) -> str:
@@ -570,6 +596,14 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
             files=files,
             new_chat=known is None,
         )
+    if tools:
+        def forget():
+            # Failed output may already be in the website's history. Replay on retry.
+            if session_id:
+                state.sessions.pop(session_id, None)
+                _save_sessions()
+
+        stream = _guard_tool_output(stream, forget)
     stream = _remove_after(stream, directory)
     completion_id = f"chatcmpl-openseek-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
@@ -710,6 +744,7 @@ async def _with_keepalive(stream):
             pending.cancel()
             with contextlib.suppress(BaseException):
                 await pending
+        await iterator.aclose()
 
 
 @app.get("/v1/models")

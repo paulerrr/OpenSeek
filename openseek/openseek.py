@@ -339,14 +339,22 @@ class DeepSeek:
             self._active_token = token
             await self._js(f"window.__openseek.pending = {json.dumps(pending)}")
 
+            completed = False
             try:
                 await (await tab.select(self.selectors.interactions.send_button)).click()
                 async for event in self._read_stream(timeout, expected_files=len(files or [])):
+                    if event.type == "done":
+                        completed = True
                     yield event
             finally:
                 self._active_token = None
                 with contextlib.suppress(Exception):
                     await self._js("window.__openseek.pending = null")
+                if not completed:
+                    # Tear down the page's active transport before releasing the browser lock.
+                    # A retry can then replay into a fresh chat without a runaway response.
+                    with contextlib.suppress(Exception):
+                        await tab.reload()
 
     async def _attach_files(self, files: list[str], timeout: float) -> None:
         """Attaches files through the page's file input and waits until DeepSeek has processed them."""
