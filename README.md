@@ -293,6 +293,13 @@ so the next request replays the client's history into a fresh chat. It does not 
 snippets and fenced examples remain text. DSML invocations with unparsed or duplicate parameters are not executed
 as empty or partial tool calls.
 
+After a valid tool call, the model sometimes goes on to write the next input turn itself: a closing
+`</system_instructions>` and invented `<tool_result>` (or `<result>`) blocks it then reasons from. OpenSeek ends the
+reply where such a block starts, at the start of a line outside code fences. The calls before it are returned and the
+invented results and everything after them are dropped. The page reloads to stop DeepSeek's generation, and the
+session mapping is dropped so the next turn replays the cleaned history into a fresh chat, since the invented
+results would otherwise stay in DeepSeek's chat and the model would keep copying them.
+
 ### Regression tests
 
 With the server dependencies installed, run `python -m unittest discover -s tests -v`.

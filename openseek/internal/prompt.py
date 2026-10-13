@@ -75,7 +75,8 @@ RULES:
   without a tool call. Check your JSON before closing the block.
 - Results arrive in the next turn as <tool_result name="..." id="...">...</tool_result>, one per call.
   Several may arrive together, sometimes followed by a new user message. Match each result to its call by
-  name and id. Never write <tool_result> blocks yourself.
+  name and id. Never write <tool_result> blocks or </system_instructions> yourself: OpenSeek cuts your
+  reply off where they start.
 - A "Reminder: call tools only with <tool_call>..." line means the tools defined earlier in this chat are
   still available.
 

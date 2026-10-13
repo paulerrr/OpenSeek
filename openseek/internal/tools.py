@@ -118,6 +118,60 @@ class ToolOutputGuard:
         self.pending, self.buffer, self.count = "", "", 0
         return rest
 
+# After its calls the model sometimes keeps going and writes the next input turn itself: a closing
+# </system_instructions> and invented <tool_result> (or <result>) blocks, which it then reasons from
+_FAKE_RESULT_STARTS = ("</system_instructions>", "<tool_result name=", "<tool_result>", "<result name=", "<result>")
+
+
+class FabricatedResultGuard:
+    """Cut a reply where a fabricated tool result starts after a valid tool call.
+
+    Only a marker at the start of a line outside code fences counts, and only once the text before it holds a
+    call for one of `tool_names`, so replies that merely mention the format are left alone. Text that might
+    still become a marker is held back. After `cut` is set, everything else is dropped.
+    """
+
+    def __init__(self, tool_names=None):
+        self.tool_names = tool_names
+        self.text = ""
+        self.buffer = ""
+        self.line = ""
+        self.mid_line = False
+        self.in_fence = False
+        self.cut = False
+
+    def feed(self, text: str) -> str:
+        if self.cut:
+            return ""
+        self.buffer += text
+        output = ""
+        while self.buffer:
+            newline = self.buffer.find("\n")
+            line = self.buffer if newline == -1 else self.buffer[: newline + 1]
+            if not self.mid_line and not self.in_fence:
+                start = line.lstrip(" \t")
+                if start.startswith(_FAKE_RESULT_STARTS) and parse_tool_calls(self.text, self.tool_names)[1]:
+                    self.cut, self.buffer = True, ""
+                    return output
+                if newline == -1 and any(marker.startswith(start) for marker in _FAKE_RESULT_STARTS):
+                    break
+            self.buffer = self.buffer[len(line) :]
+            self.text += line
+            self.line += line
+            output += line
+            self.mid_line = newline == -1
+            if not self.mid_line:
+                if self.line.lstrip().startswith(("```", "~~~")):
+                    self.in_fence = not self.in_fence
+                self.line = ""
+        return output
+
+    def finish(self) -> str:
+        rest, self.buffer = self.buffer, ""
+        self.text += rest
+        return rest
+
+
 TOOLS_REMINDER = (
     f"Reminder: call tools only with {OPEN_TAG}{{\"name\": ..., \"arguments\": {{...}}}}{CLOSE_TAG} blocks, then stop "
     "and wait for the results."

@@ -49,9 +49,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from openseek import DeepSeek
 from openseek.internal.exceptions import FileUploadError, OpenSeekException
 from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
-from openseek.internal.objects import StreamEvent
+from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import stream_research
 from openseek.internal.tools import (
+    FabricatedResultGuard,
     TOOLS_REMINDER,
     ToolCallStreamFilter,
     ToolOutputGuard,
@@ -324,6 +325,36 @@ async def _guard_tool_output(stream, forget=lambda: None):
         raise
     finally:
         await stream.aclose()
+
+
+async def _cut_fabricated_results(stream, tool_names, forget=lambda: None):
+    """Ends a reply where the model, after its tool calls, starts writing the tool results itself."""
+    guard = FabricatedResultGuard(tool_names)
+    thinking = []
+    try:
+        async for event in stream:
+            if event.type == "text":
+                text = guard.feed(event.content)
+                if text:
+                    yield StreamEvent("text", text)
+                if guard.cut:
+                    break
+            else:
+                if event.type == "thinking":
+                    thinking.append(event.content)
+                elif event.type == "done":
+                    rest = guard.finish()
+                    if rest:
+                        yield StreamEvent("text", rest)
+                yield event
+    finally:
+        # Closing the stream before it completes reloads the page, which stops DeepSeek's generation
+        await stream.aclose()
+    if guard.cut:
+        logger.warning("Cut the reply at a tool result the model wrote itself")
+        # The invented results stay in the website's chat, so the next turn replays the cleaned history
+        forget()
+        yield StreamEvent("done", response=Response(guard.text, deepthink_content="".join(thinking) or None))
 
 
 def _hash(value) -> str:
@@ -604,6 +635,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
                 _save_sessions()
 
         stream = _guard_tool_output(stream, forget)
+        stream = _cut_fabricated_results(stream, request_tools, forget)
     stream = _remove_after(stream, directory)
     completion_id = f"chatcmpl-openseek-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
