@@ -35,7 +35,8 @@ _PARAMETER_RE = re.compile(
 # The model sometimes misspells the closing tag (</call_call>, </call-tool>) or omits it before the next block,
 # or closes it with DSML markup (</｜DSML｜invoke>), so a block ends at any closing tag containing "call", a DSML
 # invoke or calls closing tag, just before the next opening tag (including a bare DSML invoke), or at the end
-_OPEN = re.escape(OPEN_TAG)
+# The model sometimes shortens the opening tag to <call>
+_OPEN = rf"(?:{re.escape(OPEN_TAG)}|<call>)"
 _CLOSE = (
     rf"</\s*[A-Za-z_-]*call[A-Za-z_-]*\s*>|</{_DSML}(?:(?:function_)?calls|invoke)\s*>"
     rf"|(?={_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN})"
@@ -51,7 +52,16 @@ _TRAILING_DSML_OPEN_RE = re.compile(rf"\s*{_DSML_OPEN}\s*\Z")
 _OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN}")
 _CLOSE_TAG_RE = re.compile(_CLOSE)
 # Stray closing markup is discarded only immediately after a successfully parsed call.
-_ORPHAN_CLOSE_RE = re.compile(rf'</{_DSML}(?:(?:function_)?calls|parameter|invoke)\s*>')
+_ORPHAN_CLOSE_RE = re.compile(
+    rf'</{_DSML}(?:(?:function_)?calls|parameter|invoke)\s*>|</\s*(?:tool[ _-]?)?calls?\s*>'
+)
+# DSML parameters closed by an invoke tag whose opening tag is missing. With no tool name it can't be called, so it is
+# discarded like stray closing markup, and only immediately after a successfully parsed call.
+_HEADLESS_START_RE = re.compile(rf'<{_DSML}parameter\s')
+_HEADLESS_INVOKE_RE = re.compile(
+    rf'(?:\s*<{_DSML}parameter\s+name="[^"]*"[^>]*>(?:(?!</?{_DSML}).)*?</(?:{_DSML})?parameter\s*>)+\s*{_INVOKE_CLOSE}',
+    re.DOTALL,
+)
 # Longest text after a "<" that is held back while streaming in case it starts an opening tag
 _MAX_OPEN_TAG_LENGTH = 256
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
@@ -262,7 +272,8 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
         position = end
         while True:
             remaining = text[position:]
-            closing = _ORPHAN_CLOSE_RE.match(text, position + len(remaining) - len(remaining.lstrip()))
+            start = position + len(remaining) - len(remaining.lstrip())
+            closing = _ORPHAN_CLOSE_RE.match(text, start) or _HEADLESS_INVOKE_RE.match(text, start)
             if closing is None:
                 break
             position = closing.end()
@@ -503,11 +514,15 @@ class ToolCallStreamFilter:
                 self._after_block = True
                 continue
             if self._after_call:
-                closing = _ORPHAN_CLOSE_RE.match(self._buffer.lstrip())
+                stripped = self._buffer.lstrip()
+                closing = _ORPHAN_CLOSE_RE.match(stripped) or _HEADLESS_INVOKE_RE.match(stripped)
                 if closing:
-                    offset = len(self._buffer) - len(self._buffer.lstrip())
+                    offset = len(self._buffer) - len(stripped)
                     self._buffer = self._buffer[offset + closing.end():]
                     continue
+                if _HEADLESS_START_RE.match(stripped):
+                    # Held until its invoke closing tag shows whether it is discarded
+                    return output
             bare = self._bare_call()
             if bare is _INCOMPLETE:
                 return output
@@ -523,7 +538,7 @@ class ToolCallStreamFilter:
                 output += self._emit(self._buffer[: start.start()])
                 self._buffer = self._buffer[start.end() :]
                 self._open = start.group(0)
-                if self._open == OPEN_TAG:
+                if re.fullmatch(_OPEN, self._open):
                     self._close_re = _CLOSE_TAG_RE
                 elif re.fullmatch(_INVOKE_OPEN, self._open):
                     self._close_re = re.compile(_INVOKE_CLOSE)

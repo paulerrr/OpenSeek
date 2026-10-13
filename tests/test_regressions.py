@@ -86,6 +86,42 @@ MANGLED_PARAMETER = '''Exploring.
 </｜｜DSML｜｜ invoke>
 </｜｜DSML｜｜ calls>'''
 
+# JSON calls followed by a spaced closing tag
+SPACED_CLOSE = '''Reading.
+
+<tool_call>
+{"name": "read", "arguments": {"path": "/x/README.md"}}
+</tool_call>
+<tool_call>
+{"name": "read", "arguments": {"path": "/x/server.py"}}
+</tool_call>
+</tool calls>'''
+
+# A JSON call followed by DSML parameters whose invoke opening tag is missing
+HEADLESS_INVOKE = '''Reading.
+
+<tool_call>
+{"name": "read", "arguments": {"path": "/x/openseek.py"}}
+</tool_call>
+<｜｜DSML｜｜ parameter name="path">/x/internal</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</tool_call>
+</｜｜DSML｜｜ calls>'''
+
+# Calls wrapped in <call> instead of <tool_call>
+SHORT_CALL_TAGS = '''Reading.
+
+<tool_call>
+{"name": "read", "arguments": {"path": "/x/interceptor.py"}}
+</tool_call>
+<call>
+{"name": "read", "arguments": {"path": "/x/stream.py"}}
+</call>
+<call>
+{"name": "read", "arguments": {"path": "/x/objects.py"}}
+</call>
+</｜｜DSML｜｜ calls>'''
+
 # A JSON call closed by a DSML invoke tag, followed by a DSML invoke with a plain </invoke>
 JSON_THEN_DSML = '''Adding a style.
 <tool_call>
@@ -113,6 +149,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (MIXED_CALL, ['read'], 'Reading.'),
                                     (JSON_THEN_DSML, ['shell', 'read'], 'Adding a style.'),
                                     (MANGLED_PARAMETER, ['read', 'read'], 'Exploring.'),
+                                    (SPACED_CLOSE, ['read', 'read'], 'Reading.'),
+                                    (HEADLESS_INVOKE, ['read'], 'Reading.'),
+                                    (SHORT_CALL_TAGS, ['read', 'read', 'read'], 'Reading.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)
@@ -163,6 +202,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unrelated_closing_markup_and_bad_json_are_preserved(self):
         for text in ['Example </｜｜DSML｜｜ calls>',
+                     'Example </tool calls>',
+                     '<｜｜DSML｜｜ parameter name="path">/x</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>',
+                     '<call>{"name":"unknown","arguments":{}}</call>',
                      '<｜DSML｜calls></｜DSML｜calls>',
                      '<tool_call>{"name":"read"} unexpected</tool_call>',
                      '<｜｜DSML｜｜ invoke name="read">unfinished']:

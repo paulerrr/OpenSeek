@@ -106,7 +106,7 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
   it's turned on with `"deepthink": true`.
 - `system` / `developer` messages become a hidden system prompt. It goes into the request payload and is never typed into the chat. It comes after OpenSeek's default instructions (`openseek/internal/prompt.py`), which teach the model the tool-calling, history-replay and attachment formats.
 - `tools` and `tool_choice` work through a prompt protocol. The tools are described to the model, and the `<tool_call>` blocks it writes (or DeepSeek's native DSML markup) come back as standard `tool_calls`. A bare `{"name": ..., "arguments": ...}` object on its own line, outside a code fence and naming one of the request's tools, counts as a call too, since the model sometimes drops the tags. Send results back as `tool` messages, as usual.
-- Tool-call parsing also handles standalone DSML `invoke` blocks without a `calls` wrapper, an extra slash in an `invoke` opening tag, and JSON calls followed by stray DSML closing tags. These forms become executable tool calls in both streaming and non-streaming responses; recognized call markup is removed from the displayed answer. Invalid blocks remain visible as text.
+- Tool-call parsing also handles standalone DSML `invoke` blocks without a `calls` wrapper, an extra slash in an `invoke` opening tag, `<call>` used in place of `<tool_call>`, DSML parameter tags missing their `parameter name="` prefix, and JSON calls followed by stray closing tags (DSML, `</tool calls>`, `</call>`). These forms become executable tool calls in both streaming and non-streaming responses; recognized call markup is removed from the displayed answer. Invalid blocks remain visible as text.
 - Mixed tool-call output with `</call-tool>` or a missing closing tag before a DSML calls wrapper is also accepted,
   and so is a `<tool_call>` JSON call closed by a DSML `invoke` / `calls` tag or followed directly by a DSML `invoke`. A stray empty DSML opener at the end is removed only after a valid call; unknown tool names and invalid JSON blocks stay visible as text.
 - A call with a single string argument whose JSON is broken by unescaped double quotes or a non-JSON backslash
@@ -287,7 +287,9 @@ start a fresh chat with the corrected history. Streaming sessions remember the e
 The first continuation of a session saved by an older version may replay its history once to adopt the new fingerprints.
 Session-ID tracking, local titles, compaction handling, persistent mappings, and streaming keepalives remain enabled.
 
-Malformed tool-call blocks remain ordinary text in their original position. Interrupted or failed upstream requests
+Malformed tool-call blocks remain ordinary text in their original position. The exception is stray markup
+immediately after a valid call: closing tags, and DSML parameters whose `invoke` opening tag is missing, are
+discarded, since without a tool name they can't be called. Interrupted or failed upstream requests
 return an error (an SSE error event when streaming), rather than a successful partial answer, and are not recorded
 as completed turns.
 
