@@ -109,6 +109,11 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
 - Tool-call parsing also handles standalone DSML `invoke` blocks without a `calls` wrapper, an extra slash in an `invoke` opening tag, and JSON calls followed by stray DSML closing tags. These forms become executable tool calls in both streaming and non-streaming responses; recognized call markup is removed from the displayed answer. Invalid blocks remain visible as text.
 - Mixed tool-call output with `</call-tool>` or a missing closing tag before a DSML calls wrapper is also accepted,
   and so is a `<tool_call>` JSON call closed by a DSML `invoke` / `calls` tag or followed directly by a DSML `invoke`. A stray empty DSML opener at the end is removed only after a valid call; unknown tool names and invalid JSON blocks stay visible as text.
+- A call with a single string argument whose JSON is broken by unescaped double quotes or a non-JSON backslash
+  escape (`grep -n "a\|b" file` written as-is) is repaired: the value runs to the last quote before the closing
+  braces, and unknown escapes are kept literally. Calls with several arguments are never repaired.
+- A DSML call whose only parameter is `arguments` is unwrapped, including when it is sent as JSON text
+  (`string="true"`), and an invoke left open before the closing `calls` tag is closed.
 - Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`), up to 50 files of 100 MB each.
 
 **Streaming behavior**

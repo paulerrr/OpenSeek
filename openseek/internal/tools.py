@@ -8,6 +8,7 @@ bare `{"name": ..., "arguments": ...}` objects written on their own line without
 request's tools and the object isn't inside a code fence.
 """
 
+import contextlib
 import json
 import re
 import uuid
@@ -346,7 +347,7 @@ def _parse_call(body: str) -> dict | None:
     try:
         data, end = json.JSONDecoder().raw_decode(body)
     except json.JSONDecodeError:
-        return None
+        return _repair_call(body)
     if _ORPHAN_CLOSE_RE.sub("", body[end:]).strip():
         return None
     if not isinstance(data, dict) or not isinstance(data.get("name"), str):
@@ -358,7 +359,54 @@ def _parse_call(body: str) -> dict | None:
     return _make_call(data["name"], arguments)
 
 
+def _close_dangling_invoke(body: str) -> str:
+    """Closes a last invoke (and its last parameter) that the model ended with the calls closing tag instead."""
+    opens = list(re.finditer(_INVOKE_OPEN, body))
+    if not opens or re.search(_INVOKE_CLOSE, body[opens[-1].end():]):
+        return body
+    tail = body[opens[-1].end():]
+    parameters = list(re.finditer(rf'<{_DSML}parameter\s', tail))
+    if parameters and not re.search(rf'</(?:{_DSML})?parameter\s*>', tail[parameters[-1].end():]):
+        body = body.rstrip() + "</parameter>"
+    return body + "</invoke>"
+
+
+# A call with one string argument, whose value is everything up to the final quote before the closing braces
+_REPAIRABLE_RE = re.compile(
+    r'\{\s*"name"\s*:\s*"([^"\\]+)"\s*,\s*"(?:arguments|parameters)"\s*:\s*'
+    r'\{\s*"([^"\\]+)"\s*:\s*"(.*)"\s*\}\s*\}',
+    re.DOTALL,
+)
+# Escapes kept when repairing; any other backslash (\| in a grep pattern, \b in a regex) is literal
+_REPAIR_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t", "r": "\r"}
+_NEXT_KEY_RE = re.compile(r'"\s*,\s*"[^"]*"\s*:')
+_REPAIR_ESCAPE_RE = re.compile(r'\\(u[0-9a-fA-F]{4}|.)', re.DOTALL)
+
+
+def _repair_call(body: str) -> dict | None:
+    """
+    Recovers a call whose single string argument isn't valid JSON, usually a shell command with unescaped
+    double quotes or a backslash that isn't a JSON escape.
+    """
+    match = _REPAIRABLE_RE.fullmatch(_ORPHAN_CLOSE_RE.sub("", body).strip())
+    if match is None:
+        return None
+    name, key, value = match.groups()
+    # Text like `", "key": ` means the object had more arguments, which can't be told apart safely
+    if _NEXT_KEY_RE.search(value):
+        return None
+
+    def unescape(escape: re.Match) -> str:
+        code = escape.group(1)
+        if len(code) == 5:
+            return chr(int(code[1:], 16))
+        return _REPAIR_ESCAPES.get(code, escape.group(0))
+
+    return _make_call(name, {key: _REPAIR_ESCAPE_RE.sub(unescape, value)})
+
+
 def _parse_dsml_calls(body: str) -> list[dict]:
+    body = _close_dangling_invoke(body)
     calls = []
     for name, invoke_body in _INVOKE_RE.findall(body):
         # Never turn unparsed or nested parameter markup into an empty/partial call.
@@ -376,8 +424,14 @@ def _parse_dsml_calls(body: str) -> list[dict]:
                 except json.JSONDecodeError:
                     arguments[key] = value
         # The model sometimes passes the whole arguments object as one parameter named "arguments"
-        if list(arguments) == ["arguments"] and isinstance(arguments["arguments"], dict):
-            arguments = arguments["arguments"]
+        if list(arguments) == ["arguments"]:
+            value = arguments["arguments"]
+            # string="true" keeps the object as JSON text
+            if isinstance(value, str):
+                with contextlib.suppress(json.JSONDecodeError):
+                    value = json.loads(value)
+            if isinstance(value, dict):
+                arguments = value
         calls.append(_make_call(name, arguments))
     return calls
 

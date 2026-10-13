@@ -52,7 +52,7 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(server._match_session('s', messages, keys(), 2)[2])
 
 
-TOOL_NAMES = {'read', 'grep', 'shell', 'glob'}
+TOOL_NAMES = {'read', 'grep', 'shell', 'glob', 'edit'}
 
 MALFORMED_DSML = '''Let me look.
 <｜｜DSML｜｜ invoke name="read">
@@ -248,6 +248,36 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 'string="false">{"command": "uname -a"}</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
         _, remembered, _ = await self.collect(text)
         self.assertEqual(json.loads(remembered[0][2][0]['function']['arguments']), {'command': 'uname -a'})
+
+    async def test_unescaped_quotes_in_single_string_argument_are_repaired(self):
+        # From an opencode transcript: inner double quotes and \| left unescaped in a shell command
+        command = 'cd /x && grep -n "scheduleSave\\|beforeunload" app.js && echo "--- \\"y\\" ---"'
+        body = '{"name": "shell", "arguments": {"command": "%s"}}' % command.replace('\\"y\\"', '\\\\"y\\\\"')
+        for closing in ['</tool_call>', '</｜｜DSML｜｜ calls>']:
+            text = 'Let me look.\n<tool_call>\n' + body + '\n' + closing
+            content, remembered, _ = await self.collect(text)
+            self.assertEqual(content.strip(), 'Let me look.')
+            self.assertEqual(json.loads(remembered[0][2][0]['function']['arguments']), {'command': command})
+
+    async def test_unrepairable_calls_stay_text(self):
+        for text in ['<tool_call>{"name": "edit", "arguments": {"path": "a", "oldString": "x"y"}}</tool_call>',
+                     '<tool_call>{"name": "shell", "arguments": {"command": "a"b"}} trailing</tool_call>',
+                     '<tool_call>{"name": "unknown", "arguments": {"command": "a"b"}}</tool_call>']:
+            content, remembered, _ = await self.collect(text)
+            self.assertEqual(content, text)
+            self.assertEqual(remembered[0][2], [])
+
+    async def test_dsml_string_arguments_closed_by_calls_tag(self):
+        # From an opencode transcript: no </parameter> or </invoke>, and an extra calls closing tag
+        edit = {'path': '/x/app.js', 'oldString': 'a\n', 'newString': '"b"'}
+        text = ('Let me make the edits.\n<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="edit">\n'
+                '<｜｜DSML｜｜ parameter name="arguments" string="true">' + json.dumps(edit)
+                + '</｜｜DSML｜｜ calls>\n</｜｜DSML｜｜ calls>')
+        for variant in [text, text.replace('</｜｜DSML｜｜ calls>\n', '</｜｜DSML｜｜ parameter>\n</invoke>\n', 1)]:
+            content, remembered, _ = await self.collect(variant)
+            self.assertEqual(content.strip(), 'Let me make the edits.')
+            self.assertEqual(json.loads(remembered[0][2][0]['function']['arguments']), edit)
+            self.assertEqual(parse_tool_calls(variant, ['edit'])[0], 'Let me make the edits.')
 
     async def test_transport_failure_never_remembers_or_finishes_successfully(self):
         ds = DeepSeek(token='test')
