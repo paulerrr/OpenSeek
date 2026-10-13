@@ -74,6 +74,18 @@ MIXED_CALL = '''Reading.
 </tool_call>
 </｜｜DSML｜｜ calls>'''
 
+# A parameter tag missing its `parameter name="` prefix
+MANGLED_PARAMETER = '''Exploring.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/openseek/internal</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/openseek/openseek.py</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ limit" string="false">150</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>'''
+
 # A JSON call closed by a DSML invoke tag, followed by a DSML invoke with a plain </invoke>
 JSON_THEN_DSML = '''Adding a style.
 <tool_call>
@@ -100,6 +112,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         for text, names, prefix in [(MALFORMED_DSML, ['read', 'shell', 'glob'], 'Let me look.'),
                                     (MIXED_CALL, ['read'], 'Reading.'),
                                     (JSON_THEN_DSML, ['shell', 'read'], 'Adding a style.'),
+                                    (MANGLED_PARAMETER, ['read', 'read'], 'Exploring.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)
@@ -116,6 +129,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(visible.strip(), prefix)
         calls = parse_tool_calls(MALFORMED_DSML, TOOL_NAMES)[1]
         self.assertEqual(json.loads(calls[2]['function']['arguments']), {'pattern': '*/', 'limit': 200})
+        calls = parse_tool_calls(MANGLED_PARAMETER, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[1]['function']['arguments']),
+                         {'path': '/x/openseek/openseek.py', 'limit': 150})
 
     async def test_mixed_call_boundaries_preserve_following_content(self):
         call = '<tool_call>{"name":"shell","arguments":{"command":"ls"}}</call-tool>'

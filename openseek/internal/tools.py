@@ -60,6 +60,11 @@ _BARE_START_RE = re.compile(r'\{\s*"name"\s*:')
 _INCOMPLETE = object()
 
 _NAMELESS_PARAMETER_RE = re.compile(rf'<{_DSML}parameter\s*>')
+# A parameter tag that lost its `parameter name="` prefix (<｜DSML｜ limit" string="false">), recognized by the stray
+# quote after the name
+_MANGLED_PARAMETER_RE = re.compile(
+    rf'<{_DSML}(?!(?:parameter|invoke|(?:function_)?calls)\b)([A-Za-z_][\w-]*)"(\s+string="(?:true|false)")?\s*>'
+)
 
 
 class ToolOutputGuard:
@@ -406,7 +411,7 @@ def _repair_call(body: str) -> dict | None:
 
 
 def _parse_dsml_calls(body: str) -> list[dict]:
-    body = _close_dangling_invoke(body)
+    body = _MANGLED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>', _close_dangling_invoke(body))
     calls = []
     for name, invoke_body in _INVOKE_RE.findall(body):
         # Never turn unparsed or nested parameter markup into an empty/partial call.
