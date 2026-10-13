@@ -75,10 +75,20 @@ MIXED_CALL = '''Reading.
 </｜｜DSML｜｜ calls>'''
 
 
+APK_CALLS = [
+    'Checking.\n<tool_call>\n'
+    '{"name": "shell", "arguments": {"command": "python3 --version"}}\n'
+    + closing + '\n<｜｜DSML｜｜ calls>'
+    for closing in ['</call-tool>', '']
+]
+APK_CALLS.append(APK_CALLS[1].replace('<tool_call>\n', ''))
+
+
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcript_malformed_calls(self):
         for text, names, prefix in [(MALFORMED_DSML, ['read', 'shell', 'glob'], 'Let me look.'),
-                                    (MIXED_CALL, ['read'], 'Reading.')]:
+                                    (MIXED_CALL, ['read'], 'Reading.'),
+                                    *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)
             calls = remembered[0][2]
@@ -94,6 +104,34 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(visible.strip(), prefix)
         calls = parse_tool_calls(MALFORMED_DSML, TOOL_NAMES)[1]
         self.assertEqual(json.loads(calls[2]['function']['arguments']), {'pattern': '*/', 'limit': 200})
+
+    async def test_mixed_call_boundaries_preserve_following_content(self):
+        call = '<tool_call>{"name":"shell","arguments":{"command":"ls"}}</call-tool>'
+        cases = [
+            (call + '\n<｜｜DSML｜｜ calls>unfinished', '<｜｜DSML｜｜ calls>unfinished', 1),
+            (call + '\n<tool_call>{"name":"read","arguments":{}}</tool_call>', '', 2),
+            (call + '\n<｜DSML｜calls><｜DSML｜invoke name="read"></invoke></｜DSML｜calls>', '', 2),
+        ]
+        for text, expected, count in cases:
+            parsed, calls = parse_tool_calls(text, TOOL_NAMES)
+            self.assertEqual(parsed, expected)
+            self.assertEqual(len(calls), count)
+            for size in [1, 7, len(text)]:
+                filt = ToolCallStreamFilter(TOOL_NAMES)
+                visible = ''.join(filt.feed(text[i:i + size]) for i in range(0, len(text), size)) + filt.finish()
+                self.assertEqual(visible.strip(), expected)
+
+    async def test_invalid_mixed_calls_remain_visible(self):
+        for body in ['not JSON', '{"name":"unknown","arguments":{}}',
+                     '{"name":"shell","arguments":42}']:
+            text = '<tool_call>' + body + '</call-tool>\n<｜｜DSML｜｜ calls>'
+            content, remembered, payloads = await self.collect(text)
+            self.assertEqual(content, text)
+            self.assertEqual(remembered[0][2], [])
+            self.assertEqual(parse_tool_calls(text, TOOL_NAMES), (text, []))
+            self.assertEqual(payloads[-1]['choices'][0]['finish_reason'], 'stop')
+        text = '<｜｜DSML｜｜ calls>'
+        self.assertEqual((await self.collect(text))[0], text)
 
     async def test_unrelated_closing_markup_and_bad_json_are_preserved(self):
         for text in ['Example </｜｜DSML｜｜ calls>',
@@ -232,9 +270,9 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
 
     async def complete(self, reply, tools):
         server.state.deepseek = FakeDeepSeek([reply])
-        tool = {'type': 'function', 'function': {'name': 'shell', 'parameters': {}}}
         req = server._ChatRequest(model='deepseek-chat', messages=[{'role': 'user', 'content': 'go'}],
-                                  tools=[tool] if tools else None)
+                                  tools=[{'type': 'function', 'function': {'name': name, 'parameters': {}}}
+                                         for name in TOOL_NAMES] if tools else None)
         return (await server.chat_completions(req))['choices'][0]
 
     async def test_bare_call_reaches_the_client(self):
@@ -244,6 +282,18 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(choice['message']['tool_calls'][0]['function']['arguments'], '{"command": "ls"}')
         choice = await self.complete(reply, tools=False)
         self.assertEqual(choice['message']['content'], reply)
+
+    async def test_apk_transcript_calls_reach_nonstreaming_client(self):
+        for reply in APK_CALLS:
+            choice = await self.complete(reply, tools=True)
+            self.assertEqual(choice['finish_reason'], 'tool_calls')
+            self.assertEqual(choice['message']['content'], 'Checking.')
+            calls = choice['message']['tool_calls']
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]['function']['name'], 'shell')
+            self.assertEqual(json.loads(calls[0]['function']['arguments']), {'command': 'python3 --version'})
+            choice = await self.complete(reply, tools=False)
+            self.assertEqual(choice['message']['content'], reply)
 
     async def test_malformed_dsml_reaches_nonstreaming_client(self):
         reply = MALFORMED_DSML

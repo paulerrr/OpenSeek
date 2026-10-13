@@ -29,16 +29,18 @@ _PARAMETER_RE = re.compile(
     re.DOTALL,
 )
 
-# The model sometimes misspells the closing tag (</call_call>) or leaves it out before the next block,
+# The model sometimes misspells the closing tag (</call_call>, </call-tool>) or omits it before the next block,
 # so a block ends at any closing tag containing "call", just before the next opening tag, or at the end
 _OPEN = re.escape(OPEN_TAG)
-_CLOSE = rf"</\s*[A-Za-z_]*call[A-Za-z_]*\s*>|(?={_OPEN})"
+_CLOSE = rf"</\s*[A-Za-z_-]*call[A-Za-z_-]*\s*>|(?={_OPEN}|{_DSML_OPEN})"
 BLOCK_RE = re.compile(
     rf"{_OPEN}(?P<json>(?:(?!{_OPEN}).)*?)(?:{_CLOSE}|\Z)"
     rf"|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}"
     rf"|(?P<invoke>{_INVOKE_OPEN}.*?{_INVOKE_CLOSE})",
     re.DOTALL,
 )
+# An empty DSML opener at end of output is discarded only after a validated call.
+_TRAILING_DSML_OPEN_RE = re.compile(rf"\s*{_DSML_OPEN}\s*\Z")
 _OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN}")
 _CLOSE_TAG_RE = re.compile(_CLOSE)
 # Stray closing markup is discarded only immediately after a successfully parsed call.
@@ -109,7 +111,10 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
         else:
             body = match.group("dsml") if match.group("dsml") is not None else match.group("invoke")
             block_calls = _parse_dsml_calls(body)
-        valid = bool(block_calls) and None not in block_calls
+        valid = bool(block_calls) and all(
+            call is not None and (tool_names is None or call["function"]["name"] in tool_names)
+            for call in block_calls
+        )
         spans.append((match.start(), match.end(), block_calls if valid else None))
     if tool_names:
         spans += _bare_call_spans(text, [(start, end) for start, end, _ in spans], tool_names)
@@ -128,6 +133,8 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
             if closing is None:
                 break
             position = closing.end()
+    if calls and _TRAILING_DSML_OPEN_RE.fullmatch(text[position:]):
+        position = len(text)
     parts.append(text[position:])
     content = re.sub(r"\n{3,}", "\n\n", "".join(parts))
     return content.strip(), calls
@@ -218,7 +225,10 @@ def _parse_call(body: str) -> dict | None:
     if not isinstance(data, dict) or not isinstance(data.get("name"), str):
         return None
 
-    return _make_call(data["name"], data.get("arguments", data.get("parameters", {})))
+    arguments = data.get("arguments", data.get("parameters", {}))
+    if not isinstance(arguments, (dict, str)):
+        return None
+    return _make_call(data["name"], arguments)
 
 
 def _parse_dsml_calls(body: str) -> list[dict]:
@@ -294,7 +304,7 @@ class ToolCallStreamFilter:
                 if end is None:
                     return output
                 block = self._open + self._buffer[: end.end()]
-                self._after_call = bool(parse_tool_calls(block)[1])
+                self._after_call = bool(parse_tool_calls(block, self._tool_names)[1])
                 if not self._after_call:
                     output += block
                 self._buffer = self._buffer[end.end() :]
@@ -313,6 +323,7 @@ class ToolCallStreamFilter:
             if bare:
                 # Drops the call along with the line's indentation
                 self._buffer = self._buffer[bare[0] :]
+                self._after_call = True
                 self._after_block = True
                 continue
             start = _OPEN_RE.search(self._buffer)
@@ -343,9 +354,10 @@ class ToolCallStreamFilter:
         rest = self._open + self._buffer
         bare = None if self._open else self._bare_call(final=True)
         self._buffer, self._open, self._close_re = "", "", None
-        if bare:
+        if bare or (self._after_call and _TRAILING_DSML_OPEN_RE.fullmatch(rest)):
             return ""
-        return "" if parse_tool_calls(rest)[1] else rest
+        content, calls = parse_tool_calls(rest, self._tool_names)
+        return content if calls else rest
 
     def _emit(self, text: str) -> str:
         """Tracks the current line and code fences in text passed through outside tag blocks."""
