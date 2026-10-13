@@ -106,6 +106,7 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
   it's turned on with `"deepthink": true`.
 - `system` / `developer` messages become a hidden system prompt. It goes into the request payload and is never typed into the chat. It comes after OpenSeek's default instructions (`openseek/internal/prompt.py`), which teach the model the tool-calling, history-replay and attachment formats.
 - `tools` and `tool_choice` work through a prompt protocol. The tools are described to the model, and the `<tool_call>` blocks it writes (or DeepSeek's native DSML markup) come back as standard `tool_calls`. A bare `{"name": ..., "arguments": ...}` object on its own line, outside a code fence and naming one of the request's tools, counts as a call too, since the model sometimes drops the tags. Send results back as `tool` messages, as usual.
+- Tool-call parsing also handles standalone DSML `invoke` blocks without a `calls` wrapper, an extra slash in an `invoke` opening tag, and JSON calls followed by stray DSML closing tags. These forms become executable tool calls in both streaming and non-streaming responses; recognized call markup is removed from the displayed answer. Invalid blocks remain visible as text.
 - Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`), up to 50 files of 100 MB each.
 
 **Streaming behavior**

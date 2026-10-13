@@ -19,8 +19,11 @@ CLOSE_TAG = "</tool_call>"
 _DSML = r"[｜|]+\s*DSML\s*[｜|]+\s*"
 _DSML_OPEN = rf"<{_DSML}(?:function_)?calls\s*>"
 _DSML_CLOSE_RE = re.compile(rf"</{_DSML}(?:function_)?calls\s*>")
-# Inner closing tags sometimes come back without the DSML delimiter (</invoke>)
-_INVOKE_RE = re.compile(rf'<{_DSML}invoke\s+name="([^"]*)"\s*>(.*?)</(?:{_DSML})?invoke\s*>', re.DOTALL)
+# Calls may lack an outer wrapper, or have an extra slash before an invoke with a name attribute.
+# Inner closing tags sometimes come back without the DSML delimiter (</invoke>).
+_INVOKE_OPEN = rf'</?{_DSML}invoke\s+name="[^"]*"\s*>'
+_INVOKE_CLOSE = rf'</(?:{_DSML})?invoke\s*>'
+_INVOKE_RE = re.compile(rf'</?{_DSML}invoke\s+name="([^"]*)"\s*>(.*?){_INVOKE_CLOSE}', re.DOTALL)
 _PARAMETER_RE = re.compile(
     rf'<{_DSML}parameter\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>(.*?)</(?:{_DSML})?parameter\s*>',
     re.DOTALL,
@@ -31,13 +34,17 @@ _PARAMETER_RE = re.compile(
 _OPEN = re.escape(OPEN_TAG)
 _CLOSE = rf"</\s*[A-Za-z_]*call[A-Za-z_]*\s*>|(?={_OPEN})"
 BLOCK_RE = re.compile(
-    rf"{_OPEN}(?P<json>(?:(?!{_OPEN}).)*?)(?:{_CLOSE}|\Z)|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}",
+    rf"{_OPEN}(?P<json>(?:(?!{_OPEN}).)*?)(?:{_CLOSE}|\Z)"
+    rf"|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}"
+    rf"|(?P<invoke>{_INVOKE_OPEN}.*?{_INVOKE_CLOSE})",
     re.DOTALL,
 )
-_OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}")
+_OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN}")
 _CLOSE_TAG_RE = re.compile(_CLOSE)
+# Stray closing markup is discarded only immediately after a successfully parsed call.
+_ORPHAN_CLOSE_RE = re.compile(rf'</{_DSML}(?:(?:function_)?calls|parameter|invoke)\s*>')
 # Longest text after a "<" that is held back while streaming in case it starts an opening tag
-_MAX_OPEN_TAG_LENGTH = 40
+_MAX_OPEN_TAG_LENGTH = 256
 _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 # A bare call is a JSON object that starts with its "name" key
 _BARE_START_RE = re.compile(r'\{\s*"name"\s*:')
@@ -100,7 +107,8 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
         if match.group("json") is not None:
             block_calls = [_parse_call(match.group("json"))]
         else:
-            block_calls = _parse_dsml_calls(match.group("dsml"))
+            body = match.group("dsml") if match.group("dsml") is not None else match.group("invoke")
+            block_calls = _parse_dsml_calls(body)
         valid = bool(block_calls) and None not in block_calls
         spans.append((match.start(), match.end(), block_calls if valid else None))
     if tool_names:
@@ -114,6 +122,12 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
         parts.append(text[position:start])
         calls.extend(span_calls)
         position = end
+        while True:
+            remaining = text[position:]
+            closing = _ORPHAN_CLOSE_RE.match(text, position + len(remaining) - len(remaining.lstrip()))
+            if closing is None:
+                break
+            position = closing.end()
     parts.append(text[position:])
     content = re.sub(r"\n{3,}", "\n\n", "".join(parts))
     return content.strip(), calls
@@ -196,8 +210,10 @@ def _object_end(text: str, start: int) -> int | None:
 def _parse_call(body: str) -> dict | None:
     body = _FENCE_RE.sub("", body.strip())
     try:
-        data = json.loads(body)
+        data, end = json.JSONDecoder().raw_decode(body)
     except json.JSONDecodeError:
+        return None
+    if _ORPHAN_CLOSE_RE.sub("", body[end:]).strip():
         return None
     if not isinstance(data, dict) or not isinstance(data.get("name"), str):
         return None
@@ -267,6 +283,7 @@ class ToolCallStreamFilter:
         self._in_fence = False
         # After a tag block, the rest of its line is never checked for a bare call, matching parse_tool_calls
         self._after_block = False
+        self._after_call = False
 
     def feed(self, text: str) -> str:
         self._buffer += text
@@ -277,12 +294,19 @@ class ToolCallStreamFilter:
                 if end is None:
                     return output
                 block = self._open + self._buffer[: end.end()]
-                if not parse_tool_calls(block)[1]:
+                self._after_call = bool(parse_tool_calls(block)[1])
+                if not self._after_call:
                     output += block
                 self._buffer = self._buffer[end.end() :]
                 self._open, self._close_re = "", None
                 self._after_block = True
                 continue
+            if self._after_call:
+                closing = _ORPHAN_CLOSE_RE.match(self._buffer.lstrip())
+                if closing:
+                    offset = len(self._buffer) - len(self._buffer.lstrip())
+                    self._buffer = self._buffer[offset + closing.end():]
+                    continue
             bare = self._bare_call()
             if bare is _INCOMPLETE:
                 return output
@@ -297,7 +321,12 @@ class ToolCallStreamFilter:
                 output += self._emit(self._buffer[: start.start()])
                 self._buffer = self._buffer[start.end() :]
                 self._open = start.group(0)
-                self._close_re = _CLOSE_TAG_RE if self._open == OPEN_TAG else _DSML_CLOSE_RE
+                if self._open == OPEN_TAG:
+                    self._close_re = _CLOSE_TAG_RE
+                elif re.fullmatch(_INVOKE_OPEN, self._open):
+                    self._close_re = re.compile(_INVOKE_CLOSE)
+                else:
+                    self._close_re = _DSML_CLOSE_RE
                 continue
             if newline != -1:
                 # Lines are passed one at a time, so the start of the next one can be checked for a bare call
@@ -320,6 +349,8 @@ class ToolCallStreamFilter:
 
     def _emit(self, text: str) -> str:
         """Tracks the current line and code fences in text passed through outside tag blocks."""
+        if text.strip():
+            self._after_call = False
         self._line += text
         while "\n" in self._line:
             line, self._line = self._line.split("\n", 1)

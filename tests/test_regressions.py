@@ -10,7 +10,7 @@ from openseek.internal.exceptions import ServerDown
 from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import parse_plan
 from openseek.internal.stream import ResponseState
-from openseek.internal.tools import parse_tool_calls
+from openseek.internal.tools import ToolCallStreamFilter, parse_tool_calls
 
 
 class SessionTests(unittest.TestCase):
@@ -52,10 +52,58 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(server._match_session('s', messages, keys(), 2)[2])
 
 
-TOOL_NAMES = {'read', 'grep', 'shell'}
+TOOL_NAMES = {'read', 'grep', 'shell', 'glob'}
+
+MALFORMED_DSML = '''Let me look.
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/home/paul/projects/InstaFix</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="shell">
+<｜｜DSML｜｜ parameter name="command" string="true">ls -la</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ invoke name="glob">
+<｜｜DSML｜｜ parameter name="pattern" string="true">*/</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="limit" string="false">200</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>'''
+
+MIXED_CALL = '''Reading.
+<tool_call>
+{"name": "read", "arguments": {"path": "/home/paul/projects/InstaFix/go.mod"}}
+</｜｜DSML｜｜ parameter>
+</tool_call>
+</｜｜DSML｜｜ calls>'''
 
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transcript_malformed_calls(self):
+        for text, names, prefix in [(MALFORMED_DSML, ['read', 'shell', 'glob'], 'Let me look.'),
+                                    (MIXED_CALL, ['read'], 'Reading.')]:
+            content, remembered, payloads = await self.collect(text)
+            self.assertEqual(content.strip(), prefix)
+            calls = remembered[0][2]
+            self.assertEqual([c['function']['name'] for c in calls], names)
+            self.assertEqual(payloads[-1]['choices'][0]['finish_reason'], 'tool_calls')
+            parsed_content, parsed_calls = parse_tool_calls(text, TOOL_NAMES)
+            self.assertEqual(parsed_content, prefix)
+            self.assertEqual([c['function'] for c in calls], [c['function'] for c in parsed_calls])
+            for size in [1, 2, 7, 53, len(text)]:
+                stream_filter = ToolCallStreamFilter(TOOL_NAMES)
+                visible = ''.join(stream_filter.feed(text[i:i + size]) for i in range(0, len(text), size))
+                visible += stream_filter.finish()
+                self.assertEqual(visible.strip(), prefix)
+        calls = parse_tool_calls(MALFORMED_DSML, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[2]['function']['arguments']), {'pattern': '*/', 'limit': 200})
+
+    async def test_unrelated_closing_markup_and_bad_json_are_preserved(self):
+        for text in ['Example </｜｜DSML｜｜ calls>',
+                     '<｜DSML｜calls></｜DSML｜calls>',
+                     '<tool_call>{"name":"read"} unexpected</tool_call>',
+                     '<｜｜DSML｜｜ invoke name="read">unfinished']:
+            content, remembered, _ = await self.collect(text)
+            self.assertEqual(content, text)
+            self.assertEqual(remembered[0][2], [])
+
     async def collect(self, text, tools=True):
         async def events():
             for char in text:
@@ -196,6 +244,14 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(choice['message']['tool_calls'][0]['function']['arguments'], '{"command": "ls"}')
         choice = await self.complete(reply, tools=False)
         self.assertEqual(choice['message']['content'], reply)
+
+    async def test_malformed_dsml_reaches_nonstreaming_client(self):
+        reply = MALFORMED_DSML
+        choice = await self.complete(reply, tools=True)
+        self.assertEqual(choice['finish_reason'], 'tool_calls')
+        self.assertEqual(choice['message']['content'], 'Let me look.')
+        self.assertEqual([c['function']['name'] for c in choice['message']['tool_calls']],
+                         ['read', 'shell', 'glob'])
 
 
 class FakeDeepSeek:
