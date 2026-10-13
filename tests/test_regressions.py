@@ -74,6 +74,17 @@ MIXED_CALL = '''Reading.
 </tool_call>
 </｜｜DSML｜｜ calls>'''
 
+# A JSON call closed by a DSML invoke tag, followed by a DSML invoke with a plain </invoke>
+JSON_THEN_DSML = '''Adding a style.
+<tool_call>
+{"name": "shell", "arguments": {"command": "ls"}}
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path">/x/styles.css</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="offset">30</｜｜DSML｜｜ parameter>
+</invoke>
+</｜｜DSML｜｜ calls>'''
+
 
 APK_CALLS = [
     'Checking.\n<tool_call>\n'
@@ -88,6 +99,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcript_malformed_calls(self):
         for text, names, prefix in [(MALFORMED_DSML, ['read', 'shell', 'glob'], 'Let me look.'),
                                     (MIXED_CALL, ['read'], 'Reading.'),
+                                    (JSON_THEN_DSML, ['shell', 'read'], 'Adding a style.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)

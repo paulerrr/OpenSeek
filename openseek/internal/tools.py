@@ -32,9 +32,13 @@ _PARAMETER_RE = re.compile(
 )
 
 # The model sometimes misspells the closing tag (</call_call>, </call-tool>) or omits it before the next block,
-# so a block ends at any closing tag containing "call", just before the next opening tag, or at the end
+# or closes it with DSML markup (</｜DSML｜invoke>), so a block ends at any closing tag containing "call", a DSML
+# invoke or calls closing tag, just before the next opening tag (including a bare DSML invoke), or at the end
 _OPEN = re.escape(OPEN_TAG)
-_CLOSE = rf"</\s*[A-Za-z_-]*call[A-Za-z_-]*\s*>|(?={_OPEN}|{_DSML_OPEN})"
+_CLOSE = (
+    rf"</\s*[A-Za-z_-]*call[A-Za-z_-]*\s*>|</{_DSML}(?:(?:function_)?calls|invoke)\s*>"
+    rf"|(?={_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN})"
+)
 BLOCK_RE = re.compile(
     rf"{_OPEN}(?P<json>(?:(?!{_OPEN}).)*?)(?:{_CLOSE}|\Z)"
     rf"|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}"
