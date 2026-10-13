@@ -122,6 +122,18 @@ SHORT_CALL_TAGS = '''Reading.
 </call>
 </｜｜DSML｜｜ calls>'''
 
+# A DSML calls wrapper closed with a second opening tag
+REOPENED_WRAPPER = '''Reading.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/tools.py</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/research.py</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ calls>'''
+
 # A JSON call closed by a DSML invoke tag, followed by a DSML invoke with a plain </invoke>
 JSON_THEN_DSML = '''Adding a style.
 <tool_call>
@@ -152,6 +164,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (SPACED_CLOSE, ['read', 'read'], 'Reading.'),
                                     (HEADLESS_INVOKE, ['read'], 'Reading.'),
                                     (SHORT_CALL_TAGS, ['read', 'read', 'read'], 'Reading.'),
+                                    (REOPENED_WRAPPER, ['read', 'read'], 'Reading.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)

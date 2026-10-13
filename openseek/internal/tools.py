@@ -49,6 +49,9 @@ BLOCK_RE = re.compile(
 )
 # An empty DSML opener at end of output is discarded only after a validated call.
 _TRAILING_DSML_OPEN_RE = re.compile(rf"\s*{_DSML_OPEN}\s*\Z")
+# An unclosed DSML opener directly before a validated call is the start of its wrapper, which the model closed with a
+# second opener (<｜DSML｜calls>) instead of a closing tag
+_LEADING_DSML_OPEN_RE = re.compile(rf"{_DSML_OPEN}\s*\Z")
 _OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN}")
 _CLOSE_TAG_RE = re.compile(_CLOSE)
 # Stray closing markup is discarded only immediately after a successfully parsed call.
@@ -267,7 +270,7 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
     for start, end, span_calls in spans:
         if span_calls is None:
             continue
-        parts.append(text[position:start])
+        parts.append(_LEADING_DSML_OPEN_RE.sub("", text[position:start]))
         calls.extend(span_calls)
         position = end
         while True:
