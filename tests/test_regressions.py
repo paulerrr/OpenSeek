@@ -134,6 +134,22 @@ REOPENED_WRAPPER = '''Reading.
 </｜｜DSML｜｜ invoke>
 <｜｜DSML｜｜ calls>'''
 
+# Parameters closed twice, and a last invoke with a slashed opener and no closing tag
+DOUBLE_PARAMETER_CLOSE = '''Checking.
+
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/.gitignore</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="glob">
+<｜｜DSML｜｜ parameter name="pattern" string="true">**/{TODO,TODO.md}</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/tests</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ calls>'''
+
 # A JSON call closed by a DSML invoke tag, followed by a DSML invoke with a plain </invoke>
 JSON_THEN_DSML = '''Adding a style.
 <tool_call>
@@ -165,6 +181,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (HEADLESS_INVOKE, ['read'], 'Reading.'),
                                     (SHORT_CALL_TAGS, ['read', 'read', 'read'], 'Reading.'),
                                     (REOPENED_WRAPPER, ['read', 'read'], 'Reading.'),
+                                    (DOUBLE_PARAMETER_CLOSE, ['read', 'glob', 'read'], 'Checking.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)

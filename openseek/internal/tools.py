@@ -73,6 +73,8 @@ _BARE_START_RE = re.compile(r'\{\s*"name"\s*:')
 _INCOMPLETE = object()
 
 _NAMELESS_PARAMETER_RE = re.compile(rf'<{_DSML}parameter\s*>')
+# The model sometimes closes a parameter twice; an extra closing tag between parameters is ignored
+_STRAY_PARAMETER_CLOSE_RE = re.compile(rf'</(?:{_DSML})?parameter\s*>')
 # A parameter tag that lost its `parameter name="` prefix (<｜DSML｜ limit" string="false">), recognized by the stray
 # quote after the name
 _MANGLED_PARAMETER_RE = re.compile(
@@ -429,7 +431,7 @@ def _parse_dsml_calls(body: str) -> list[dict]:
     calls = []
     for name, invoke_body in _INVOKE_RE.findall(body):
         # Never turn unparsed or nested parameter markup into an empty/partial call.
-        if _PARAMETER_RE.sub("", invoke_body).strip():
+        if _STRAY_PARAMETER_CLOSE_RE.sub("", _PARAMETER_RE.sub("", invoke_body)).strip():
             return []
         arguments = {}
         for key, is_string, value in _PARAMETER_RE.findall(invoke_body):
