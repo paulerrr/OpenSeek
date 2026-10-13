@@ -52,6 +52,7 @@ from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
 from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import stream_research
 from openseek.internal.tools import (
+    CUT_NOTE,
     FabricatedResultGuard,
     TOOLS_REMINDER,
     ToolCallStreamFilter,
@@ -106,6 +107,8 @@ class _Chat(BaseModel):
     instructions_hash: str | None
     # Fingerprints of the messages the chat holds; kept only for sessions
     keys: list[str] = []
+    # The last reply was cut at tool results the model invented, which stay in the chat; the next turn says so
+    cut: bool = False
 
 
 class _State:
@@ -327,10 +330,16 @@ async def _guard_tool_output(stream, forget=lambda: None):
         await stream.aclose()
 
 
-async def _cut_fabricated_results(stream, tool_names, forget=lambda: None):
-    """Ends a reply where the model, after its tool calls, starts writing the tool results itself."""
+async def _cut_fabricated_results(stream, tool_names, chat_id=lambda: None, on_cut=lambda: None):
+    """
+    Ends a reply where the model, after its tool calls, starts writing the tool results itself.
+
+    `chat_id` returns the chat being written to, read at the cut so the reply can still be remembered, and `on_cut`
+    is called once the reply is cut.
+    """
     guard = FabricatedResultGuard(tool_names)
     thinking = []
+    cut_chat_id = None
     try:
         async for event in stream:
             if event.type == "text":
@@ -338,6 +347,7 @@ async def _cut_fabricated_results(stream, tool_names, forget=lambda: None):
                 if text:
                     yield StreamEvent("text", text)
                 if guard.cut:
+                    cut_chat_id = chat_id()
                     break
             else:
                 if event.type == "thinking":
@@ -352,9 +362,13 @@ async def _cut_fabricated_results(stream, tool_names, forget=lambda: None):
         await stream.aclose()
     if guard.cut:
         logger.warning("Cut the reply at a tool result the model wrote itself")
-        # The invented results stay in the website's chat, so the next turn replays the cleaned history
-        forget()
-        yield StreamEvent("done", response=Response(guard.text, deepthink_content="".join(thinking) or None))
+        # The invented results stay in the website's chat. Replaying a long session into a new chat can take
+        # minutes, so the chat is kept and the next turn tells the model its invented results were discarded.
+        on_cut()
+        yield StreamEvent(
+            "done",
+            response=Response(guard.text, chat_id=cut_chat_id, deepthink_content="".join(thinking) or None),
+        )
 
 
 def _hash(value) -> str:
@@ -571,6 +585,8 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
             system_prompt = instructions or None
         else:
             system_prompt = TOOLS_REMINDER if tools else None
+        if known.cut:
+            system_prompt = "\n\n".join(part for part in (system_prompt, CUT_NOTE) if part)
         if compacting:
             logger.info("Summarizing session %s in chat %s", session_id, chat_id)
         else:
@@ -582,6 +598,12 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
         system_prompt = instructions or None
         logger.info("New chat (%d earlier messages replayed)", len(history))
 
+    cut = False
+
+    def on_cut() -> None:
+        nonlocal cut
+        cut = True
+
     def remember(response, content: str, calls: list[dict]) -> None:
         # The chat stays as it was before a summary; the compacted conversation after it starts a new chat
         if compacting or not response.chat_id:
@@ -589,7 +611,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
         reply_key = _message_key("assistant", content, calls)
         if session_id:
             state.sessions[session_id] = _Chat(
-                chat_id=response.chat_id, instructions_hash=instructions_hash, keys=keys + [reply_key]
+                chat_id=response.chat_id, instructions_hash=instructions_hash, keys=keys + [reply_key], cut=cut
             )
             state.sessions.move_to_end(session_id)
             while len(state.sessions) > MAX_SESSIONS:
@@ -597,7 +619,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
             _save_sessions()
             return
         state.chats[_conversation_key(keys + [reply_key])] = _Chat(
-            chat_id=response.chat_id, instructions_hash=instructions_hash
+            chat_id=response.chat_id, instructions_hash=instructions_hash, cut=cut
         )
         while len(state.chats) > MAX_CONVERSATIONS:
             state.chats.popitem(last=False)
@@ -635,7 +657,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
                 _save_sessions()
 
         stream = _guard_tool_output(stream, forget)
-        stream = _cut_fabricated_results(stream, request_tools, forget)
+        stream = _cut_fabricated_results(stream, request_tools, lambda: chat_id or ds.active_chat_id, on_cut)
     stream = _remove_after(stream, directory)
     completion_id = f"chatcmpl-openseek-{uuid.uuid4().hex[:24]}"
     created = int(time.time())

@@ -49,27 +49,34 @@ class GuardTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_endpoint_keeps_real_calls_and_forgets_session(self):
-        for streaming in [False, True]:
-            closed = []
+    async def test_endpoint_keeps_real_calls_and_chat_then_notes_the_cut(self):
+        tools = [{'type': 'function', 'function': {'name': name}} for name in sorted(NAMES)]
+        for streaming, known in [(False, True), (True, True), (False, False), (True, False)]:
+            closed, sent = [], []
 
-            async def events(*args, **kwargs):
+            async def events(message, **kwargs):
+                sent.append(kwargs)
                 try:
-                    yield StreamEvent('thinking', 'plan')
-                    for char in FABRICATED:
-                        yield StreamEvent('text', char)
-                    yield StreamEvent('done', response=Response(text=FABRICATED, chat_id='bad'))
+                    if len(sent) == 1:
+                        yield StreamEvent('thinking', 'plan')
+                        for char in FABRICATED:
+                            yield StreamEvent('text', char)
+                        yield StreamEvent('done', response=Response(text=FABRICATED, chat_id='bad'))
+                    else:
+                        yield StreamEvent('text', 'Done.')
+                        yield StreamEvent('done', response=Response(text='Done.', chat_id=kwargs['chat_id']))
                 finally:
                     closed.append(True)
 
             ds = Mock()
             ds.stream_message = events
-            request = server._ChatRequest(
-                messages=[{'role': 'user', 'content': 'go'}], stream=streaming,
-                tools=[{'type': 'function', 'function': {'name': name}} for name in sorted(NAMES)])
-            sessions = OrderedDict(s=server._Chat(chat_id='old', instructions_hash=None))
+            ds.active_chat_id = 'new'
+            expected_chat = 'old' if known else 'new'
+            sessions = OrderedDict(s=server._Chat(chat_id='old', instructions_hash=None)) if known else OrderedDict()
             with patch.object(server.state, 'deepseek', ds), patch.object(server.state, 'sessions', sessions), \
                     patch.object(server.state, 'chats', OrderedDict()), patch.object(server, '_save_sessions'):
+                request = server._ChatRequest(
+                    messages=[{'role': 'user', 'content': 'go'}], stream=streaming, tools=tools)
                 if streaming:
                     response = await server.chat_completions(request, 's')
                     chunks = [part async for part in response.body_iterator]
@@ -84,6 +91,39 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(message['reasoning_content'], 'plan')
                 self.assertEqual(content.strip(), 'Let me read the file.')
                 self.assertEqual([c['function']['name'] for c in calls], ['read'])
-                self.assertNotIn('s', sessions)
-                self.assertFalse(server.state.chats)
                 self.assertEqual(closed, [True])
+                # The chat is kept instead of being replayed, and marked as cut
+                self.assertEqual(sessions['s'].chat_id, expected_chat)
+                self.assertTrue(sessions['s'].cut)
+
+                # The client echoes the reply back with the real result
+                call = calls[0]
+                assistant = {'role': 'assistant', 'content': content,
+                             'tool_calls': [{'id': call['id'], 'type': 'function', 'function': call['function']}]}
+                request = server._ChatRequest(messages=[
+                    {'role': 'user', 'content': 'go'}, assistant,
+                    {'role': 'tool', 'tool_call_id': call['id'], 'content': 'real'}], tools=tools)
+                message = (await server.chat_completions(request, 's'))['choices'][0]['message']
+                self.assertEqual(message['content'], 'Done.')
+                self.assertEqual(sent[1]['chat_id'], expected_chat)
+                self.assertFalse(sent[1]['new_chat'])
+                self.assertIn(server.CUT_NOTE, sent[1]['system_prompt'])
+                self.assertFalse(sessions['s'].cut)
+
+    async def test_cut_without_known_chat_replays_next_turn(self):
+        async def events(message, **kwargs):
+            for char in FABRICATED:
+                yield StreamEvent('text', char)
+            yield StreamEvent('done', response=Response(text=FABRICATED, chat_id='bad'))
+
+        ds = Mock()
+        ds.stream_message = events
+        ds.active_chat_id = None
+        sessions = OrderedDict()
+        with patch.object(server.state, 'deepseek', ds), patch.object(server.state, 'sessions', sessions), \
+                patch.object(server.state, 'chats', OrderedDict()), patch.object(server, '_save_sessions'):
+            request = server._ChatRequest(messages=[{'role': 'user', 'content': 'go'}],
+                                          tools=[{'type': 'function', 'function': {'name': 'read'}}])
+            message = (await server.chat_completions(request, 's'))['choices'][0]['message']
+            self.assertEqual([c['function']['name'] for c in message['tool_calls']], ['read'])
+            self.assertNotIn('s', sessions)

@@ -177,6 +177,13 @@ TOOLS_REMINDER = (
     "and wait for the results."
 )
 
+# Sent with the turn after a reply was cut at results the model wrote itself, which stay in DeepSeek's chat
+CUT_NOTE = (
+    "Your previous reply was cut off after your tool calls, where you began writing tool results yourself. Only "
+    "those calls ran. Everything you wrote after them was discarded and never shown; any results in it were invented. "
+    "The real results are in this message. Never write <tool_result> blocks yourself."
+)
+
 
 def build_tools_prompt(tools: list[dict], tool_choice=None) -> str:
     """Describes the available tools and the calling protocol."""

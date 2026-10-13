@@ -77,6 +77,8 @@ class DeepSeek:
         # Interceptor events for the in-flight request, matched by token
         self._events: asyncio.Queue = asyncio.Queue()
         self._active_token: str | None = None
+        # Chat of the latest sent message, known as soon as the request goes out, even if its stream is cut short
+        self.active_chat_id: str | None = None
         self.selectors = DeepSeekSelectors()
 
         self.logger = self._setup_logger()
@@ -424,6 +426,7 @@ class DeepSeek:
             kind = message.get("kind")
             if kind == "request":
                 chat_id = message.get("chat_id")
+                self.active_chat_id = chat_id or self._current_chat_id()
                 attached = len(message.get("ref_file_ids") or [])
                 if attached < expected_files:
                     self.logger.warning(f"Only {attached} of {expected_files} files were attached to the request.")

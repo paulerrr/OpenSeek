@@ -296,9 +296,11 @@ as empty or partial tool calls.
 After a valid tool call, the model sometimes goes on to write the next input turn itself: a closing
 `</system_instructions>` and invented `<tool_result>` (or `<result>`) blocks it then reasons from. OpenSeek ends the
 reply where such a block starts, at the start of a line outside code fences. The calls before it are returned and the
-invented results and everything after them are dropped. The page reloads to stop DeepSeek's generation, and the
-session mapping is dropped so the next turn replays the cleaned history into a fresh chat, since the invented
-results would otherwise stay in DeepSeek's chat and the model would keep copying them.
+invented results and everything after them are dropped. The page reloads to stop DeepSeek's generation. The
+conversation stays in the same DeepSeek chat, since replaying a long session into a fresh chat can take minutes, but
+the invented results stay in that chat, so the next turn's hidden instructions tell the model its reply was cut,
+that anything after its calls was discarded, and that the real results follow. If the chat ID isn't known, the next
+turn replays the history into a fresh chat instead.
 
 ### Regression tests
 
