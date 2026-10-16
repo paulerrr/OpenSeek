@@ -162,6 +162,18 @@ JSON_THEN_DSML = '''Adding a style.
 </｜｜DSML｜｜ calls>'''
 
 
+# Calls followed by a closing tool_result tag echoed from the result format
+ECHOED_RESULT_CLOSE = '''Reading.
+
+<tool_call>
+{"name": "read", "arguments": {"path": "/x/README.md"}}
+</tool_call>
+<tool_call>
+{"name": "read", "arguments": {"path": "/x/server.py"}}
+</tool_call>
+</tool_result>'''
+
+
 APK_CALLS = [
     'Checking.\n<tool_call>\n'
     '{"name": "shell", "arguments": {"command": "python3 --version"}}\n'
@@ -182,6 +194,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (SHORT_CALL_TAGS, ['read', 'read', 'read'], 'Reading.'),
                                     (REOPENED_WRAPPER, ['read', 'read'], 'Reading.'),
                                     (DOUBLE_PARAMETER_CLOSE, ['read', 'glob', 'read'], 'Checking.'),
+                                    (ECHOED_RESULT_CLOSE, ['read', 'read'], 'Reading.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)
@@ -233,6 +246,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_unrelated_closing_markup_and_bad_json_are_preserved(self):
         for text in ['Example </｜｜DSML｜｜ calls>',
                      'Example </tool calls>',
+                     'Example </tool_result>',
                      '<｜｜DSML｜｜ parameter name="path">/x</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>',
                      '<call>{"name":"unknown","arguments":{}}</call>',
                      '<｜DSML｜calls></｜DSML｜calls>',

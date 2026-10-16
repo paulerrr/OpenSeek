@@ -54,9 +54,10 @@ _TRAILING_DSML_OPEN_RE = re.compile(rf"\s*{_DSML_OPEN}\s*\Z")
 _LEADING_DSML_OPEN_RE = re.compile(rf"{_DSML_OPEN}\s*\Z")
 _OPEN_RE = re.compile(rf"{_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN}")
 _CLOSE_TAG_RE = re.compile(_CLOSE)
-# Stray closing markup is discarded only immediately after a successfully parsed call.
+# Stray closing markup is discarded only immediately after a successfully parsed call. That includes a
+# </tool_result> echoed from the format results arrive in.
 _ORPHAN_CLOSE_RE = re.compile(
-    rf'</{_DSML}(?:(?:function_)?calls|parameter|invoke)\s*>|</\s*(?:tool[ _-]?)?calls?\s*>'
+    rf'</{_DSML}(?:(?:function_)?calls|parameter|invoke)\s*>|</\s*(?:tool[ _-]?)?(?:calls?|results?)\s*>'
 )
 # DSML parameters closed by an invoke tag whose opening tag is missing. With no tool name it can't be called, so it is
 # discarded like stray closing markup, and only immediately after a successfully parsed call.
