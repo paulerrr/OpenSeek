@@ -54,13 +54,13 @@ from openseek.internal.research import stream_research
 from openseek.internal.tools import (
     CUT_NOTE,
     FabricatedResultGuard,
-    TOOLS_REMINDER,
     ToolCallStreamFilter,
     ToolOutputGuard,
     build_tools_prompt,
     format_tool_call,
     format_tool_result,
     parse_tool_calls,
+    tool_turn_instructions,
 )
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(message)s")
@@ -541,7 +541,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
     tools = req.tools if req.tools and req.tool_choice != "none" and not research else None
     instructions = "\n\n".join(
         part
-        for part in (DEFAULT_PROMPT, system, build_tools_prompt(tools, req.tool_choice) if tools else "")
+        for part in (DEFAULT_PROMPT, system, build_tools_prompt(tools) if tools else "")
         if part
     )
     instructions_hash = _hash(instructions) if instructions else None
@@ -584,7 +584,7 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
         if instructions_hash != known.instructions_hash:
             system_prompt = instructions or None
         else:
-            system_prompt = TOOLS_REMINDER if tools else None
+            system_prompt = None
         if known.cut:
             system_prompt = "\n\n".join(part for part in (system_prompt, CUT_NOTE) if part)
         if compacting:
@@ -597,6 +597,10 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
         message = f"{_render_history(history, tool_names)}\n\n{turn}" if history else turn
         system_prompt = instructions or None
         logger.info("New chat (%d earlier messages replayed)", len(history))
+
+    system_prompt = "\n\n".join(
+        part for part in (system_prompt, tool_turn_instructions(tools, req.tool_choice)) if part
+    )
 
     cut = False
 

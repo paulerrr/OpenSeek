@@ -154,6 +154,11 @@ existing chat, so the long history isn't sent again, and the compacted session t
 which keeps DeepSeek's own chat from getting too long. opencode's session-title requests are answered by the server
 from your first message, without using the browser (`OPENSEEK_LOCAL_TITLES=0` sends them to DeepSeek).
 
+Tool definitions use compact JSON with stable ordering, so reordering tools or schema keys does not resend their
+definitions to an existing chat. Each turn restates its tool-choice instruction, including when tools are disabled,
+so older tool permissions in the browser history do not remain the only guidance. Tool choice is prompt-based,
+not a guarantee that the model follows it.
+
 **openclaude:**
 
 ```bash

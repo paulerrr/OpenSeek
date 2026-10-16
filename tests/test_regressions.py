@@ -10,7 +10,7 @@ from openseek.internal.exceptions import ServerDown
 from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import parse_plan
 from openseek.internal.stream import ResponseState
-from openseek.internal.tools import ToolCallStreamFilter, parse_tool_calls
+from openseek.internal.tools import ToolCallStreamFilter, build_tools_prompt, parse_tool_calls
 
 
 class SessionTests(unittest.TestCase):
@@ -397,6 +397,29 @@ class EndpointTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         server.state.deepseek, server.state.chats = self.previous
+
+    async def test_tool_permissions_on_reused_chat(self):
+        fake = FakeDeepSeek(['OK', 'OK', 'OK'])
+        server.state.deepseek = fake
+        messages = [{'role': 'user', 'content': 'Read the project.'}]
+        tools = [{'type': 'function', 'function': {'name': 'read', 'parameters': {}}}]
+        for choice in ['auto', 'required', 'none']:
+            result = await server.chat_completions(server._ChatRequest(
+                messages=messages, tools=tools, tool_choice=choice))
+            messages.extend([result['choices'][0]['message'], {'role': 'user', 'content': 'Continue.'}])
+        self.assertFalse(fake.calls[1][1]['new_chat'])
+        self.assertIn('must call at least one tool', fake.calls[1][1]['system_prompt'])
+        self.assertNotIn('Available tools (JSON)', fake.calls[1][1]['system_prompt'])
+        self.assertIn('No tools are available', fake.calls[2][1]['system_prompt'])
+
+    def test_tool_schema_order_does_not_change_instructions(self):
+        first = {'name': 'read', 'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'}}}}
+        second = {'name': 'edit', 'parameters': {}}
+        prompt = build_tools_prompt([first, second])
+        self.assertEqual(prompt, build_tools_prompt([second, dict(reversed(list(first.items())))]))
+        encoded = prompt.split('Available tools (JSON):\n')[1]
+        self.assertEqual(json.loads(encoded)[1]['parameters'], first['parameters'])
+        self.assertLess(len(encoded), len(json.dumps([first, second], indent=2)))
 
     async def complete(self, reply, tools):
         server.state.deepseek = FakeDeepSeek([reply])

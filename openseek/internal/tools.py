@@ -206,6 +206,19 @@ CUT_NOTE = (
 )
 
 
+def tool_turn_instructions(tools: list[dict] | None, tool_choice=None) -> str:
+    """Restate turn-specific permissions even when the chat retains older tools."""
+    if not tools or tool_choice == "none":
+        return "No tools are available for this turn. Do not call tools defined in earlier turns."
+    if tool_choice == "required":
+        choice = "You must call at least one tool in this reply."
+    elif isinstance(tool_choice, dict) and tool_choice.get("function", {}).get("name"):
+        choice = f"You must call the `{tool_choice['function']['name']}` tool in this reply."
+    else:
+        choice = "Call tools only when they help; otherwise answer normally."
+    return TOOLS_REMINDER + " " + choice
+
+
 def build_tools_prompt(tools: list[dict], tool_choice=None) -> str:
     """Describes the available tools and the calling protocol."""
     definitions = []
@@ -243,7 +256,7 @@ Rules:
 - Only call tools listed below. {choice}
 
 Available tools (JSON):
-{json.dumps(definitions, indent=2)}"""
+{json.dumps(sorted(definitions, key=lambda item: item['name']), sort_keys=True, separators=(',', ':'), ensure_ascii=False)}"""
 
 
 def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
