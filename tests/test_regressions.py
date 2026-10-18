@@ -394,6 +394,25 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any('"finish_reason": "stop"' in chunk for chunk in chunks))
         self.assertEqual(remembered, [])
 
+    def test_deepthink_answer_appends_after_path_without_op(self):
+        # Captured from a DeepThink reply: the answer's path arrives without `o` and must keep appending
+        lines = [
+            {"v": {"response": {"fragments": [{"type": "THINK", "content": "We"}]}}},
+            {"p": "response/fragments/-1/content", "o": "APPEND", "v": " need"},
+            {"v": " answer."},
+            {"p": "response/fragments/-1/elapsed_secs", "o": "SET", "v": 1.15},
+            {"p": "response/fragments", "o": "APPEND", "v": [{"type": "RESPONSE", "content": "hi"}]},
+            {"p": "response/fragments/-1/content", "v": " m"},
+            {"v": "ike."},
+            {"p": "response", "o": "BATCH", "v": [{"p": "quasi_status", "v": "FINISHED"}]},
+        ]
+        state = ResponseState()
+        deltas = [delta for line in lines for delta in state.feed(None, json.dumps(line))]
+        self.assertEqual(state.text_of('THINK'), 'We need answer.')
+        self.assertEqual(state.text_of('RESPONSE'), 'hi mike.')
+        self.assertEqual(''.join(text for kind, text in deltas if kind == 'RESPONSE'), 'hi mike.')
+        self.assertEqual(state.fragments[0]['elapsed_secs'], 1.15)
+
     async def test_failed_status_rejects_partial_response(self):
         ds = DeepSeek(token='test')
         state = ResponseState()

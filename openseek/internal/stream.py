@@ -75,7 +75,9 @@ class ResponseState:
 
         if "p" in payload:
             self._path = payload["p"]
-            self._op = payload.get("o", "SET")
+            # A new path without `o` keeps the previous op: after a DeepThink answer's RESPONSE fragment is
+            # appended, its text arrives as `{"p": ".../-1/content", "v": ...}` and must still append
+            self._op = payload.get("o", self._op or "SET")
         elif "o" in payload:
             self._op = payload["o"]
 
