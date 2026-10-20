@@ -22,13 +22,13 @@ CLOSE_TAG = "</tool_call>"
 _DSML = r"[｜|]+\s*DSML\s*[｜|]+\s*"
 _DSML_OPEN = rf"<{_DSML}(?:function_)?calls\s*>"
 _DSML_CLOSE_RE = re.compile(rf"</{_DSML}(?:function_)?calls\s*>")
-# Calls may lack an outer wrapper, or have an extra slash before an invoke with a name attribute.
+# Calls may lack an outer wrapper, or have an extra slash before an invoke or parameter with a name attribute.
 # Inner closing tags sometimes come back without the DSML delimiter (</invoke>).
 _INVOKE_OPEN = rf'</?{_DSML}invoke\s+name="[^"]*"\s*>'
 _INVOKE_CLOSE = rf'</(?:{_DSML})?invoke\s*>'
 _INVOKE_RE = re.compile(rf'</?{_DSML}invoke\s+name="([^"]*)"\s*>(.*?){_INVOKE_CLOSE}', re.DOTALL)
 _PARAMETER_RE = re.compile(
-    rf'<{_DSML}parameter\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>(.*?)</(?:{_DSML})?parameter\s*>',
+    rf'</?{_DSML}parameter\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>(.*?)</(?:{_DSML})?parameter\s*>',
     re.DOTALL,
 )
 
@@ -81,6 +81,8 @@ _STRAY_PARAMETER_CLOSE_RE = re.compile(rf'</(?:{_DSML})?parameter\s*>')
 _MANGLED_PARAMETER_RE = re.compile(
     rf'<{_DSML}(?!(?:parameter|invoke|(?:function_)?calls)\b)([A-Za-z_][\w-]*)"(\s+string="(?:true|false)")?\s*>'
 )
+# A parameter closed by a closing tag with no name at all (</｜DSML｜>)
+_BARE_DSML_CLOSE_RE = re.compile(rf'</{_DSML}>')
 
 
 class ToolOutputGuard:
@@ -441,6 +443,7 @@ def _repair_call(body: str) -> dict | None:
 
 
 def _parse_dsml_calls(body: str) -> list[dict]:
+    body = _BARE_DSML_CLOSE_RE.sub("</parameter>", body)
     body = _MANGLED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>', _close_dangling_invoke(body))
     calls = []
     for name, invoke_body in _INVOKE_RE.findall(body):

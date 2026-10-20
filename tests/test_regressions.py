@@ -86,6 +86,27 @@ MANGLED_PARAMETER = '''Exploring.
 </｜｜DSML｜｜ invoke>
 </｜｜DSML｜｜ calls>'''
 
+# A parameter opening tag with an extra slash, like the slashed invoke opener
+SLASHED_PARAMETER = MANGLED_PARAMETER.replace(
+    '<｜｜DSML｜｜ limit" string', '</｜｜DSML｜｜ parameter name="limit" string')
+
+# Parameters closed by a nameless DSML tag, with the invoke left unclosed before the calls closing tag
+BARE_PARAMETER_CLOSE = '''Wiring the gate.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="edit">
+<｜｜DSML｜｜ parameter name="newString" string="true">        if not gate(re.search(rf"<@!?{self.user.id}>", text)):
+            return
+</｜DSML｜｜ parameter>
+<｜DSML｜｜ parameter name="oldString" string="true">        direct = 1
+</｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="path" string="true">/x/bot.py</｜｜DSML｜｜>
+</｜DSML｜｜ calls>
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/bot.py</｜｜DSML｜｜>
+<｜｜DSML｜｜ parameter name="offset" string="false">340</｜｜DSML｜｜>
+</｜DSML｜｜ calls>'''
+
 # JSON calls followed by a spaced closing tag
 SPACED_CLOSE = '''Reading.
 
@@ -189,6 +210,8 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (MIXED_CALL, ['read'], 'Reading.'),
                                     (JSON_THEN_DSML, ['shell', 'read'], 'Adding a style.'),
                                     (MANGLED_PARAMETER, ['read', 'read'], 'Exploring.'),
+                                    (SLASHED_PARAMETER, ['read', 'read'], 'Exploring.'),
+                                    (BARE_PARAMETER_CLOSE, ['edit', 'read'], 'Wiring the gate.'),
                                     (SPACED_CLOSE, ['read', 'read'], 'Reading.'),
                                     (HEADLESS_INVOKE, ['read'], 'Reading.'),
                                     (SHORT_CALL_TAGS, ['read', 'read', 'read'], 'Reading.'),
@@ -211,9 +234,13 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(visible.strip(), prefix)
         calls = parse_tool_calls(MALFORMED_DSML, TOOL_NAMES)[1]
         self.assertEqual(json.loads(calls[2]['function']['arguments']), {'pattern': '*/', 'limit': 200})
-        calls = parse_tool_calls(MANGLED_PARAMETER, TOOL_NAMES)[1]
-        self.assertEqual(json.loads(calls[1]['function']['arguments']),
-                         {'path': '/x/openseek/openseek.py', 'limit': 150})
+        calls = parse_tool_calls(BARE_PARAMETER_CLOSE, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[1]['function']['arguments']), {'path': '/x/bot.py', 'offset': 340})
+        self.assertTrue(json.loads(calls[0]['function']['arguments'])['newString'].endswith('return\n'))
+        for text in [MANGLED_PARAMETER, SLASHED_PARAMETER]:
+            calls = parse_tool_calls(text, TOOL_NAMES)[1]
+            self.assertEqual(json.loads(calls[1]['function']['arguments']),
+                             {'path': '/x/openseek/openseek.py', 'limit': 150})
 
     async def test_mixed_call_boundaries_preserve_following_content(self):
         call = '<tool_call>{"name":"shell","arguments":{"command":"ls"}}</call-tool>'
