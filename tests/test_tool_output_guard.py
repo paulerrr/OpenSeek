@@ -79,9 +79,10 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(server.state.chats)
                 self.assertEqual(closed, [True])
 
-    async def test_aborted_browser_turn_reloads_before_unlocking(self):
+    async def test_aborted_browser_turn_schedules_recovery(self):
         ds = DeepSeek(token='test')
-        ds._initialized = True
+        ds._initialized = ds._healthy = True
+        ds._recover_browser = AsyncMock()
         tab = Mock()
         tab.wait_for = AsyncMock()
         tab.send = AsyncMock()
@@ -97,6 +98,8 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ServerDown):
             async for _ in server._guard_tool_output(ds.stream_message('go')):
                 pass
-        tab.reload.assert_awaited_once()
+        await ds._recovery_task
+        ds._recover_browser.assert_awaited_once()
+        self.assertFalse(ds._healthy)
         self.assertFalse(ds._lock.locked())
         self.assertIsNone(ds._active_token)

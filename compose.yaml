@@ -8,6 +8,7 @@ services:
       - DEEPSEEK_PASSWORD=${DEEPSEEK_PASSWORD}
       - DEEPSEEK_TOKEN=${DEEPSEEK_TOKEN}
       - OPENSEEK_PORT=8888
+      - OPENSEEK_REQUEST_TIMEOUT=${OPENSEEK_REQUEST_TIMEOUT:-120}
       - OPENSEEK_LOCAL_TITLES=${OPENSEEK_LOCAL_TITLES:-1}
       - OPENSEEK_STATE_FILE=/data/sessions.json
       # Set only when a prompt file is given; the server then reads it instead of its default prompt

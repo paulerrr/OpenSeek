@@ -13,9 +13,11 @@ from zendriver import cdp
 
 from .internal.exceptions import (
     FileUploadError,
+    OpenSeekException,
     InvalidCredentials,
     MissingCredentials,
     MissingInitialization,
+    RateLimited,
     ServerDown,
     VerificationRequired,
 )
@@ -72,6 +74,11 @@ class DeepSeek:
         self.user_data_dir = user_data_dir
 
         self._initialized = False
+        self._healthy = False
+        self._recovery_task = None
+        self._keepalive_task = None
+        self.browser_timeout = 20.0
+        self.recovery_timeout = 60.0
         # Serializes browser interactions so the keep-alive reload never interrupts a response
         self._lock = asyncio.Lock()
         # Interceptor events for the in-flight request, matched by token
@@ -120,6 +127,11 @@ class DeepSeek:
             except FileNotFoundError as e:
                 raise MissingInitialization("Install Xvfb: `sudo apt install xvfb`") from e
 
+        await asyncio.wait_for(self._launch_browser(), self.recovery_timeout)
+        self._initialized = True
+        self._keepalive_task = asyncio.create_task(self._keep_alive())
+
+    async def _launch_browser(self):
         self.browser = await zendriver.start(
             chrome_args=self.chrome_args, headless=self.headless, user_data_dir=self.user_data_dir
         )
@@ -132,19 +144,69 @@ class DeepSeek:
         )
 
         await self._login()
-        self._initialized = True
-        asyncio.create_task(self._keep_alive())
+        self._healthy = True
+
+    async def _browser_call(self, operation):
+        """Bound CDP commands even when the renderer stops answering."""
+        return await asyncio.wait_for(operation, self.browser_timeout)
+
+    async def _stop_browser(self):
+        browser = getattr(self, "browser", None)
+        if browser is None:
+            return
+        try:
+            await asyncio.wait_for(browser.stop(), 5)
+        except (Exception, asyncio.CancelledError) as exc:
+            # Browser.stop itself can hang on CDP. Kill the owned process as a fallback.
+            process = getattr(browser, "_process", None)
+            if process is not None and process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await asyncio.wait_for(asyncio.to_thread(process.wait), 5)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+
+    def _schedule_recovery(self):
+        self._healthy = False
+        self._active_token = None
+        self.active_chat_id = None
+        if self._recovery_task is None or self._recovery_task.done():
+            self._recovery_task = asyncio.create_task(self._recover_browser())
+
+    async def _recover_browser(self):
+        self.logger.warning("Replacing unresponsive or interrupted DeepSeek browser")
+        try:
+            await self._stop_browser()
+            await asyncio.wait_for(self._launch_browser(), self.recovery_timeout)
+            self.logger.info("DeepSeek browser recovered")
+        except (Exception, OpenSeekException):
+            self._healthy = False
+            self.logger.exception("DeepSeek browser recovery failed")
+            await self._stop_browser()
+
+    async def _ensure_browser(self):
+        # Call while holding _lock. A timed-out client must not cancel shared recovery.
+        if not self._healthy:
+            self._schedule_recovery()
+            await asyncio.shield(self._recovery_task)
+            if not self._healthy:
+                raise ServerDown("DeepSeek browser recovery failed; retry later")
 
     async def _keep_alive(self):
-        """Keeps browser session alive by periodic actions."""
         while self._initialized:
             await asyncio.sleep(300)
             async with self._lock:
                 if not self._initialized:
                     break
-                await self.browser.main_tab.reload()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await self.browser.main_tab.wait_for(self.selectors.interactions.textbox, timeout=15)
+                try:
+                    await self._ensure_browser()
+                    await self._browser_call(self.browser.main_tab.reload())
+                    await self._browser_call(
+                        self.browser.main_tab.wait_for(self.selectors.interactions.textbox, timeout=15)
+                    )
+                except (Exception, OpenSeekException):
+                    self.logger.warning("Browser keep-alive failed", exc_info=True)
+                    self._schedule_recovery()
 
     async def _install_interceptor(self) -> None:
         """Installs the request interceptor on every page load and routes its events to `_events`."""
@@ -167,7 +229,7 @@ class DeepSeek:
 
     async def _js(self, expression: str):
         """Evaluates a JavaScript expression in the main tab."""
-        return await self.browser.main_tab.evaluate(expression)
+        return await self._browser_call(self.browser.main_tab.evaluate(expression))
 
     async def _exists(self, selector: str) -> bool:
         return bool(await self._js(f"!!document.querySelector({json.dumps(selector)})"))
@@ -298,8 +360,8 @@ class DeepSeek:
         Takes the same arguments as `send_message`, plus `new_chat` to start a new chat first. Starting it here, under
         the same lock as the send, keeps a concurrent request from switching chats in between.
 
-        Yields "thinking" and "text" deltas, then a final "done" event carrying the complete `Response`. Stops without a
-        "done" event on timeout.
+        Yields "thinking" and "text" deltas, then a final "done" event carrying the complete `Response`. The timeout includes queueing,
+        recovery, browser setup and response generation.
 
         Raises:
             FileUploadError: If an attached file is missing, or DeepSeek fails to process it.
@@ -307,56 +369,92 @@ class DeepSeek:
         if not self._initialized:
             raise MissingInitialization("Call `initialize()` before sending messages.")
 
-        async with self._lock:
-            tab = self.browser.main_tab
+        deadline = asyncio.get_running_loop().time() + timeout
+        acquired = False
+        started = False
+        completed = False
+        rejected = False
+        stream = None
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout)
+            acquired = True
+            remaining = deadline - asyncio.get_running_loop().time()
+            await asyncio.wait_for(self._ensure_browser(), max(0, remaining))
+            started = True
+            stream = self._stream_message_locked(
+                message, slow_mode, deepthink, search, timeout, slow_mode_delay,
+                chat_id, system_prompt, files, new_chat,
+            )
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                try:
+                    event = await asyncio.wait_for(anext(stream), max(0, remaining))
+                except StopAsyncIteration:
+                    return
+                if event.type == "done":
+                    completed = True
+                yield event
+        except RateLimited:
+            rejected = True
+            raise
+        except asyncio.TimeoutError as exc:
+            raise ServerDown("DeepSeek request deadline exceeded (queue or browser operation)") from exc
+        except Exception as exc:
+            raise ServerDown(f"DeepSeek browser operation failed: {exc}") from exc
+        finally:
+            if acquired:
+                try:
+                    if stream is not None:
+                        await stream.aclose()
+                finally:
+                    if started and not completed and not rejected:
+                        self._schedule_recovery()
+                    self._lock.release()
 
-            if new_chat:
-                await self._open_new_chat()
-            elif chat_id is not None and chat_id != self._current_chat_id():
-                self.logger.debug(f"Switching to chat ID: {chat_id}")
-                await tab.get(f"{BASE_URL}a/chat/s/{chat_id}")
+    async def _stream_message_locked(
+        self, message, slow_mode, deepthink, search, timeout, slow_mode_delay,
+        chat_id, system_prompt, files, new_chat,
+    ):
+        tab = self.browser.main_tab
 
-            # Wait for the chat to load
-            await tab.wait_for(self.selectors.interactions.textbox, timeout=10)
-            if files:
-                await self._attach_files(files, timeout)
-            textbox = await tab.select(self.selectors.interactions.textbox)
-            await textbox.click()
+        if new_chat:
+            await self._open_new_chat()
+        elif chat_id is not None and chat_id != self._current_chat_id():
+            self.logger.debug(f"Switching to chat ID: {chat_id}")
+            await self._browser_call(tab.get(f"{BASE_URL}a/chat/s/{chat_id}"))
 
-            self.logger.debug(f"Sending message: {message}")
-            # insertText avoids key events, so newlines in the message don't trigger an early send
-            if slow_mode:
-                for char in message:
-                    await asyncio.sleep(slow_mode_delay)
-                    await tab.send(cdp.input_.insert_text(char))
-                    await asyncio.sleep(slow_mode_delay)
-            else:
-                await tab.send(cdp.input_.insert_text(message))
+        # Wait for the chat to load
+        await self._browser_call(tab.wait_for(self.selectors.interactions.textbox, timeout=10))
+        if files:
+            await self._attach_files(files, timeout)
+        textbox = await self._browser_call(tab.select(self.selectors.interactions.textbox))
+        await self._browser_call(textbox.click())
 
-            # Arm the interceptor: the next completion request gets these payload changes
-            token = uuid.uuid4().hex
-            prefix = f"<system_instructions>\n{system_prompt}\n</system_instructions>\n\n" if system_prompt else ""
-            pending = {"token": token, "prefix": prefix, "thinking": deepthink, "search": search}
-            self._events = asyncio.Queue()
-            self._active_token = token
-            await self._js(f"window.__openseek.pending = {json.dumps(pending)}")
+        self.logger.debug(f"Sending message: {message}")
+        # insertText avoids key events, so newlines in the message don't trigger an early send
+        if slow_mode:
+            for char in message:
+                await asyncio.sleep(slow_mode_delay)
+                await self._browser_call(tab.send(cdp.input_.insert_text(char)))
+                await asyncio.sleep(slow_mode_delay)
+        else:
+            await self._browser_call(tab.send(cdp.input_.insert_text(message)))
 
-            completed = False
-            try:
-                await (await tab.select(self.selectors.interactions.send_button)).click()
-                async for event in self._read_stream(timeout, expected_files=len(files or [])):
-                    if event.type == "done":
-                        completed = True
-                    yield event
-            finally:
-                self._active_token = None
-                with contextlib.suppress(Exception):
-                    await self._js("window.__openseek.pending = null")
-                if not completed:
-                    # Tear down the page's active transport before releasing the browser lock.
-                    # A retry can then replay into a fresh chat without a runaway response.
-                    with contextlib.suppress(Exception):
-                        await tab.reload()
+        # Arm the interceptor: the next completion request gets these payload changes
+        token = uuid.uuid4().hex
+        prefix = f"<system_instructions>\n{system_prompt}\n</system_instructions>\n\n" if system_prompt else ""
+        pending = {"token": token, "prefix": prefix, "thinking": deepthink, "search": search}
+        self._events = asyncio.Queue()
+        self._active_token = token
+        await self._js(f"window.__openseek.pending = {json.dumps(pending)}")
+
+        button = await self._browser_call(tab.select(self.selectors.interactions.send_button))
+        await self._browser_call(button.click())
+        try:
+            async for event in self._read_stream(timeout, expected_files=len(files or [])):
+                yield event
+        finally:
+            self._active_token = None
 
     async def _attach_files(self, files: list[str], timeout: float) -> None:
         """Attaches files through the page's file input and waits until DeepSeek has processed them."""
@@ -365,7 +463,9 @@ class DeepSeek:
         if missing:
             raise FileUploadError(f"File not found: {', '.join(missing)}")
 
-        file_input = await self.browser.main_tab.select(self.selectors.interactions.file_input)
+        file_input = await self._browser_call(
+            self.browser.main_tab.select(self.selectors.interactions.file_input)
+        )
         # The page silently drops files whose extension isn't in the input's `accept` list
         accepted = {ext.strip().lower() for ext in (file_input.attrs.get("accept") or "").split(",") if ext.strip()}
         unsupported = [path.name for path in paths if accepted and path.suffix.lower() not in accepted]
@@ -374,7 +474,7 @@ class DeepSeek:
 
         self.logger.debug(f"Attaching files: {paths}")
         await self._js("window.__openseek.files = {}; window.__openseek.fileErrors = []")
-        await file_input.send_file(*paths)
+        await self._browser_call(file_input.send_file(*paths))
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -399,7 +499,7 @@ class DeepSeek:
     async def _discard_attachments(self) -> None:
         """Reloads the chat so attachments that failed don't stay in the composer for the next message."""
         tab = self.browser.main_tab
-        await tab.get(tab.url or BASE_URL)
+        await self._browser_call(tab.get(tab.url or BASE_URL))
         with contextlib.suppress(asyncio.TimeoutError):
             await tab.wait_for(self.selectors.interactions.textbox, timeout=15)
 
@@ -447,6 +547,14 @@ class DeepSeek:
                 return
 
     def _build_response(self, state: ResponseState, raw: str, status: int | None, chat_id: str | None) -> Response:
+        detail = state.error
+        if not detail and not state.fragments:
+            with contextlib.suppress(json.JSONDecodeError, AttributeError):
+                detail = json.loads(raw).get("msg")
+        if not state.fragments and (
+            status == 429 or (isinstance(detail, str) and "messages too frequent" in detail.lower())
+        ):
+            raise RateLimited(f"DeepSeek rate limited the request: {detail or 'HTTP 429'}. Try again later.")
         if status is None or not 200 <= status < 300:
             raise ServerDown(f"DeepSeek request failed (HTTP {status})")
         if state.error:
@@ -488,13 +596,21 @@ class DeepSeek:
         if not self._initialized:
             raise MissingInitialization("Call `initialize()` before starting a new chat.")
 
+        await asyncio.wait_for(self._start_new_chat_locked(), self.recovery_timeout + self.browser_timeout)
+
+    async def _start_new_chat_locked(self):
         async with self._lock:
-            await self._open_new_chat()
+            await self._ensure_browser()
+            try:
+                await self._open_new_chat()
+            except (Exception, asyncio.CancelledError):
+                self._schedule_recovery()
+                raise
 
     async def _open_new_chat(self) -> None:
         tab = self.browser.main_tab
-        await tab.get(BASE_URL)
-        await tab.wait_for(self.selectors.interactions.textbox, timeout=15)
+        await self._browser_call(tab.get(BASE_URL))
+        await self._browser_call(tab.wait_for(self.selectors.interactions.textbox, timeout=15))
         self.logger.debug("New chat started.")
 
     async def close(self) -> None:
@@ -502,8 +618,13 @@ class DeepSeek:
         Cleans up resources and closes browser.
         """
         self._initialized = False
-        if hasattr(self, "browser"):
-            await self.browser.stop()
+        self._healthy = False
+        for task in (self._keepalive_task, self._recovery_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        await self._stop_browser()
         if hasattr(self, "display"):
             self.display.stop()
 

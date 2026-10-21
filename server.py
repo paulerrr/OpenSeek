@@ -47,7 +47,7 @@ from pydantic import BaseModel, ConfigDict
 
 sys.path.insert(0, os.path.dirname(__file__))
 from openseek import DeepSeek
-from openseek.internal.exceptions import FileUploadError, OpenSeekException
+from openseek.internal.exceptions import FileUploadError, OpenSeekException, RateLimited
 from openseek.internal.prompt import DEFAULT_SYSTEM_PROMPT
 from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import stream_research
@@ -72,6 +72,7 @@ PASSWORD = os.getenv("DEEPSEEK_PASSWORD", "")
 TOKEN = os.getenv("DEEPSEEK_TOKEN", "")
 USER_DATA_DIR = os.getenv("OPENSEEK_USER_DATA_DIR") or None
 TIMEOUT = int(os.getenv("OPENSEEK_TIMEOUT", "300"))
+REQUEST_TIMEOUT = float(os.getenv("OPENSEEK_REQUEST_TIMEOUT", "120"))
 # A file whose contents replace the default instructions; an empty file disables them
 SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
 # Answer opencode's session-title requests locally instead of tying up the browser; "0" sends them to DeepSeek
@@ -323,6 +324,9 @@ async def _guard_tool_output(stream, forget=lambda: None):
                     if rest:
                         yield StreamEvent("text", rest)
                 yield event
+    except RateLimited:
+        # A refused request did not add model output to the chat. Keep its mapping.
+        raise
     except OpenSeekException:
         forget()
         raise
@@ -523,6 +527,16 @@ def _wants_deepresearch(req: _ChatRequest) -> bool:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[str | None, Header()] = None):
+    deadline = asyncio.get_running_loop().time() + REQUEST_TIMEOUT
+    try:
+        return await asyncio.wait_for(
+            _chat_completions(req, x_opencode_session_id, deadline), REQUEST_TIMEOUT
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=503, detail="OpenSeek request deadline exceeded") from exc
+
+
+async def _chat_completions(req, x_opencode_session_id, deadline):
     ds = state.deepseek
     if ds is None:
         raise HTTPException(status_code=503, detail="Session not ready")
@@ -662,13 +676,20 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
 
         stream = _guard_tool_output(stream, forget)
         stream = _cut_fabricated_results(stream, request_tools, lambda: chat_id or ds.active_chat_id, on_cut)
-    stream = _remove_after(stream, directory)
+    stream = _request_deadline(
+        _remove_after(stream, directory), deadline=deadline
+    )
     completion_id = f"chatcmpl-openseek-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
 
+    def restore_rate_limited_chat():
+        if known and not session_id:
+            state.chats[_conversation_key(keys[: len(history)])] = known
+
     if req.stream:
         return StreamingResponse(
-            _stream_completion(stream, completion_id, created, req.model, request_tools, remember),
+            _stream_completion(stream, completion_id, created, req.model, request_tools, remember,
+                               restore_rate_limited_chat),
             media_type="text/event-stream",
         )
 
@@ -679,6 +700,9 @@ async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[s
                 response = event.response
     except FileUploadError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    except RateLimited as e:
+        restore_rate_limited_chat()
+        raise HTTPException(status_code=429, detail=str(e), headers={"Retry-After": str(e.retry_after)}) from e
     except OpenSeekException as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
     if response is None:
@@ -708,7 +732,8 @@ def _usage(response) -> dict:
     return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": response.token_usage or 0}
 
 
-async def _stream_completion(stream, completion_id: str, created: int, model: str, tool_names, remember):
+async def _stream_completion(stream, completion_id: str, created: int, model: str, tool_names, remember,
+                             on_rate_limit=lambda: None):
     def chunk(delta: dict, finish_reason: str | None = None, **extra) -> str:
         body = {
             "id": completion_id,
@@ -720,8 +745,9 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
         }
         return f"data: {json.dumps(body)}\n\n"
 
-    def error(message: str, code: int) -> str:
-        return f"data: {json.dumps({'error': {'message': message, 'type': 'server_error', 'code': code}})}\n\n"
+    def error(message: str, code: int, **extra) -> str:
+        kind = "rate_limit_error" if code == 429 else "server_error"
+        return f"data: {json.dumps({'error': {'message': message, 'type': kind, 'code': code, **extra}})}\n\n"
 
     yield chunk({"role": "assistant", "content": ""})
     # None when the request has no tools; a (possibly empty) set of names otherwise
@@ -744,6 +770,12 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
     except FileUploadError as e:
         logger.error("Stream failed: %s", e)
         yield error(str(e), 400)
+        yield "data: [DONE]\n\n"
+        return
+    except RateLimited as e:
+        on_rate_limit()
+        logger.warning("Stream rate limited: %s", e)
+        yield error(str(e), 429, retry_after=e.retry_after)
         yield "data: [DONE]\n\n"
         return
     except OpenSeekException as e:
@@ -777,6 +809,25 @@ async def _stream_completion(stream, completion_id: str, created: int, model: st
     logger.info("← streamed %d chars, %d tool calls", len(content), len(calls))
     yield chunk({}, "tool_calls" if calls else "stop", usage=_usage(response))
     yield "data: [DONE]\n\n"
+
+
+async def _request_deadline(stream, timeout=None, *, deadline=None):
+    """One budget for queueing and all turns, including multi-turn research."""
+    if deadline is None:
+        deadline = asyncio.get_running_loop().time() + timeout
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(
+                    anext(stream), max(0, deadline - asyncio.get_running_loop().time())
+                )
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError as exc:
+                raise OpenSeekException("OpenSeek request deadline exceeded") from exc
+            yield event
+    finally:
+        await stream.aclose()
 
 
 async def _with_keepalive(stream):
@@ -818,7 +869,11 @@ async def list_models():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "session_active": state.deepseek is not None}
+    ds = state.deepseek
+    ready = ds is not None and ds._initialized and ds._healthy
+    if not ready:
+        raise HTTPException(status_code=503, detail="DeepSeek browser unavailable or recovering")
+    return {"status": "ok", "session_active": True}
 
 
 if __name__ == "__main__":

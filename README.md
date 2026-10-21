@@ -84,6 +84,10 @@ docker compose up -d
 
 The image includes Chromium and Xvfb, so the host doesn't need a display or a browser.
 
+After updating the code, rebuild and redeploy with `docker compose up -d --build`.
+Check `curl -f http://localhost:8888/health` after startup; a ready session returns
+`{"status":"ok","session_active":true}`. The named data volume preserves saved session mappings.
+
 ## 🔌 OpenAI-compatible server
 
 | Endpoint                    | Description                               |
@@ -104,6 +108,7 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
   `content`. Plans are capped at 6 steps, a failed step is skipped, and tool calling is off for these requests. A run
   takes several minutes; other requests still get the browser between its turns. DeepThink applies to every turn when
   it's turned on with `"deepthink": true`.
+  Increase `OPENSEEK_REQUEST_TIMEOUT` above its default 120 seconds for longer research runs.
 - `system` / `developer` messages become a hidden system prompt. It goes into the request payload and is never typed into the chat. It comes after OpenSeek's default instructions (`openseek/internal/prompt.py`), which teach the model the tool-calling, history-replay and attachment formats.
 - `tools` and `tool_choice` work through a prompt protocol. The tools are described to the model, and the `<tool_call>` blocks it writes (or DeepSeek's native DSML markup) come back as standard `tool_calls`. A bare `{"name": ..., "arguments": ...}` object on its own line, outside a code fence and naming one of the request's tools, counts as a call too, since the model sometimes drops the tags. Send results back as `tool` messages, as usual.
 - Tool-call parsing also handles standalone DSML `invoke` blocks without a `calls` wrapper, an extra slash in an `invoke` opening tag, `<call>` used in place of `<tool_call>`, DSML parameter tags missing their `parameter name="` prefix, and JSON calls followed by stray closing tags (DSML, `</tool calls>`, `</call>`). These forms become executable tool calls in both streaming and non-streaming responses; recognized call markup is removed from the displayed answer. Invalid blocks remain visible as text.
@@ -114,12 +119,20 @@ The image includes Chromium and Xvfb, so the host doesn't need a display or a br
   braces, and unknown escapes are kept literally. Calls with several arguments are never repaired.
 - A DSML call whose only parameter is `arguments` is unwrapped, including when it is sent as JSON text
   (`string="true"`), and an invoke left open before the closing `calls` tag is closed.
+- DSML wrappers can also contain JSON `<tool_call>` blocks, including stray closing tags after valid
+  calls. Parameters missing their opening prefix may close with their own matching name (for example,
+  `pattern`), and a nameless opening `invoke` tag can close an invocation. The entire wrapper must be
+  valid: unknown tools, conflicting parameters, and unexplained text prevent partial execution.
 - Attachments: `image_url` parts (data URLs or http(s) URLs) and `file` parts (`file_data` + `filename`), up to 50 files of 100 MB each.
 
 **Streaming behavior**
 
 - While a request waits its turn for the browser, the stream sends a `: keepalive` comment every 15 seconds, so clients don't time it out.
 - Failures arrive as an `{"error": {...}}` event with a status-like `code`: `504` when DeepSeek doesn't answer within `OPENSEEK_TIMEOUT`, `503` when DeepSeek is busy or returns an error, and `400` when an attachment can't be uploaded.
+- Explicit rate-limit refusals before any answer return code `429`, type `rate_limit_error`, and
+  `retry_after: 10`. Non-streaming requests return HTTP 429 with `Retry-After: 10`. This is a suggested
+  retry delay, not an upstream guarantee. The browser and existing chat mapping are retained; the
+  client decides whether to retry. Errors after partial output still follow normal failure recovery.
 
 ### Use it with coding agents
 
@@ -292,6 +305,17 @@ start a fresh chat with the corrected history. Streaming sessions remember the e
 The first continuation of a session saved by an older version may replay its history once to adopt the new fingerprints.
 Session-ID tracking, local titles, compaction handling, persistent mappings, and streaming keepalives remain enabled.
 
+Browser commands have a 20-second deadline. Interrupted requests or failed keep-alives replace the browser
+automatically; recovery has a 60-second startup budget. Queued requests retain their original deadline while
+recovery runs. `/health` returns 503 during recovery or after recovery fails. The overall request deadline
+produces a retryable 503, or an SSE error after streaming begins. Explicit rate-limit refusals retain the
+browser and existing chat mapping instead, as described under streaming behavior.
+
+The default prompt also asks the model to distinguish observations from conclusions, deduplicate price-history
+observations by listing ID, compare equivalent products, disclose filters, and verify current availability.
+These instructions guide the model; OpenSeek does not independently validate its statistical conclusions.
+Custom prompt files replace the default prompt and must include any desired guidance themselves.
+
 Malformed tool-call blocks remain ordinary text in their original position. The exception is stray markup
 immediately after a valid call: closing tags, and DSML parameters whose `invoke` opening tag is missing, are
 discarded, since without a tool name they can't be called. Interrupted or failed upstream requests
@@ -326,6 +350,7 @@ Run `node --test tests/interceptor.test.cjs` to check browser transport-error ha
 | `DEEPSEEK_TOKEN`              | -       | User token (recommended)                                          |
 | `DEEPSEEK_EMAIL` / `DEEPSEEK_PASSWORD` | - | Alternative to the token; may hit email verification          |
 | `OPENSEEK_PORT`               | `8888`  | Server port                                                       |
+| `OPENSEEK_REQUEST_TIMEOUT` | `120` | Overall queue, browser and generation budget, including all research turns |
 | `OPENSEEK_TIMEOUT`            | `300`   | Seconds to wait for a reply                                       |
 | `OPENSEEK_USER_DATA_DIR`      | -       | Persistent Chrome profile directory                               |
 | `OPENSEEK_STATE_FILE`         | `<OPENSEEK_USER_DATA_DIR>/openseek-sessions.json` | File that saves opencode sessions and their DeepSeek chats across restarts |

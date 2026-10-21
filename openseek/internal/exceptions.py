@@ -14,6 +14,12 @@ class ServerDown(OpenSeekException):
     pass
 
 
+class RateLimited(ServerDown):
+    """An explicit upstream refusal, not a broken browser or partial answer."""
+
+    retry_after = 10
+
+
 class MissingInitialization(OpenSeekException):
     pass
 

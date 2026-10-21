@@ -83,6 +83,13 @@ _MANGLED_PARAMETER_RE = re.compile(
 )
 # A parameter closed by a closing tag with no name at all (</｜DSML｜>)
 _BARE_DSML_CLOSE_RE = re.compile(rf'</{_DSML}>')
+# A mangled parameter may also close with its own name instead of "parameter".
+# Require the names to match so ambiguous markup is never guessed into arguments.
+_NAMED_PARAMETER_RE = re.compile(
+    rf'<{_DSML}(?!(?:parameter|invoke|(?:function_)?calls)\b)([A-Za-z_][\w-]*)"'
+    rf'(\s+string="(?:true|false)")?\s*>((?:(?!</?{_DSML}).)*?)</{_DSML}\1\s*>',
+    re.DOTALL,
+)
 
 
 class ToolOutputGuard:
@@ -443,10 +450,31 @@ def _repair_call(body: str) -> dict | None:
 
 
 def _parse_dsml_calls(body: str) -> list[dict]:
+    body = re.sub(rf'<{_DSML}invoke\s*>', '</invoke>', body)
+    body = _NAMED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>\3</parameter>', body)
     body = _BARE_DSML_CLOSE_RE.sub("</parameter>", body)
     body = _MANGLED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>', _close_dangling_invoke(body))
     calls = []
-    for name, invoke_body in _INVOKE_RE.findall(body):
+    position = 0
+    # A DSML wrapper can contain JSON tool_call blocks as well as native invokes.
+    # Validate the entire wrapper before executing any of it.
+    for block in BLOCK_RE.finditer(body):
+        gap = body[position:block.start()]
+        if calls:
+            gap = _ORPHAN_CLOSE_RE.sub("", gap)
+        if gap.strip() or block.group("dsml") is not None:
+            return []
+        position = block.end()
+        if block.group("json") is not None:
+            call = _parse_call(block.group("json"))
+            if call is None:
+                return []
+            calls.append(call)
+            continue
+        invoke = _INVOKE_RE.fullmatch(block.group("invoke"))
+        if invoke is None:
+            return []
+        name, invoke_body = invoke.groups()
         # Never turn unparsed or nested parameter markup into an empty/partial call.
         if _STRAY_PARAMETER_CLOSE_RE.sub("", _PARAMETER_RE.sub("", invoke_body)).strip():
             return []
@@ -471,7 +499,8 @@ def _parse_dsml_calls(body: str) -> list[dict]:
             if isinstance(value, dict):
                 arguments = value
         calls.append(_make_call(name, arguments))
-    return calls
+    tail = _ORPHAN_CLOSE_RE.sub("", body[position:]) if calls else body[position:]
+    return calls if not tail.strip() else []
 
 
 def _make_call(name: str, arguments) -> dict:
