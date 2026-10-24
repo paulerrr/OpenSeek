@@ -118,7 +118,9 @@ Check `curl -f http://localhost:8888/health` after startup; a ready session retu
   escape (`grep -n "a\|b" file` written as-is) is repaired: the value runs to the last quote before the closing
   braces, and unknown escapes are kept literally. Calls with several arguments are never repaired.
 - A DSML call whose only parameter is `arguments` is unwrapped, including when it is sent as JSON text
-  (`string="true"`), and an invoke left open before the closing `calls` tag is closed.
+  (`string="true"`), and an invoke left open before the closing `calls` tag is closed. When the tool declares a
+  parameters schema, an `input` wrapper is unwrapped too, but a wrapper is kept when it is one of the tool's real
+  parameters or its keys aren't. DSML values for parameters the schema declares as strings stay text.
 - DSML wrappers can also contain JSON `<tool_call>` blocks, including stray closing tags after valid
   calls. Parameters missing their opening prefix may close with their own matching name (for example,
   `pattern`), and a nameless opening `invoke` tag can close an invocation. The entire wrapper must be

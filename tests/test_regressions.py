@@ -1,3 +1,4 @@
+import asyncio
 import json
 import unittest
 import unittest.mock
@@ -617,6 +618,74 @@ class ResearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(server._wants_deepresearch(request(model='deepseek-research', deepresearch=False)))
         self.assertTrue(server._wants_deepresearch(request(model='deepseek-chat', deepresearch=True)))
         self.assertFalse(server._wants_deepresearch(request(model='deepseek-chat')))
+
+
+def dsml_call(name, parameters):
+    """A DSML call; `parameters` is a list of (name, string attribute or None, value)."""
+    body = ''.join(
+        f'<｜｜DSML｜｜ parameter name="{key}"' + (f' string="{string}"' if string else '') + f'>{value}</｜｜DSML｜｜ parameter>\n'
+        for key, string, value in parameters
+    )
+    return f'<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="{name}">\n{body}</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+
+
+class DsmlSchemaTests(unittest.TestCase):
+    # Edge cases from vLLM's DeepSeek V4 DSML parser (vllm-project/vllm#41240)
+    TOOLS = {
+        'shell': {'type': 'object', 'properties': {'command': {'type': 'string'}, 'timeout': {'type': 'integer'}}},
+        'run': {'type': 'object', 'properties': {'arguments': {'type': 'object'}}},
+        'transform': {'type': 'object', 'properties': {'input': {'type': 'object'}}},
+        'bare': None,
+    }
+
+    def arguments(self, text, tools=None):
+        calls = parse_tool_calls(text, self.TOOLS if tools is None else tools)[1]
+        self.assertEqual(len(calls), 1)
+        return json.loads(calls[0]['function']['arguments'])
+
+    def test_wrappers_unwrap_when_not_schema_fields(self):
+        for wrapper in ['arguments', 'input']:
+            for string in ['true', 'false']:
+                text = dsml_call('shell', [(wrapper, string, '{"command": "ls", "timeout": 5}')])
+                self.assertEqual(self.arguments(text), {'command': 'ls', 'timeout': 5})
+
+    def test_real_wrapper_named_fields_are_kept(self):
+        self.assertEqual(self.arguments(dsml_call('run', [('arguments', 'false', '{"x": 1}')])), {'arguments': {'x': 1}})
+        self.assertEqual(self.arguments(dsml_call('transform', [('input', 'false', '{"x": 1}')])), {'input': {'x': 1}})
+
+    def test_wrapper_with_unknown_keys_is_kept(self):
+        text = dsml_call('shell', [('arguments', 'false', '{"cmd": "ls"}')])
+        self.assertEqual(self.arguments(text), {'arguments': {'cmd': 'ls'}})
+
+    def test_without_schema_only_arguments_unwraps(self):
+        for tools in [self.TOOLS, {'bare'}]:
+            self.assertEqual(self.arguments(dsml_call('bare', [('arguments', 'false', '{"x": 1}')]), tools), {'x': 1})
+            self.assertEqual(self.arguments(dsml_call('bare', [('input', 'false', '{"x": 1}')]), tools),
+                             {'input': {'x': 1}})
+
+    def test_string_schema_keeps_text_values(self):
+        text = dsml_call('shell', [('command', None, '123'), ('timeout', None, '30')])
+        self.assertEqual(self.arguments(text), {'command': '123', 'timeout': 30})
+        self.assertEqual(self.arguments(text, {'shell'}), {'command': 123, 'timeout': 30})
+        # string="true" stays literal whatever the schema says
+        self.assertEqual(self.arguments(dsml_call('shell', [('timeout', 'true', '30')])), {'timeout': '30'})
+
+    def test_streamed_response_uses_schema(self):
+        async def events():
+            text = dsml_call('shell', [('input', 'false', '{"command": "true"}')])
+            for char in text:
+                yield StreamEvent('text', char)
+            yield StreamEvent('done', response=Response(text=text, chat_id='chat'))
+
+        async def collect():
+            remembered = []
+            async for _ in server._stream_completion(events(), 'id', 0, 'deepseek-chat', self.TOOLS,
+                                                     lambda *args: remembered.append(args)):
+                pass
+            return remembered
+
+        remembered = asyncio.run(collect())
+        self.assertEqual(json.loads(remembered[0][2][0]['function']['arguments']), {'command': 'true'})
 
 
 if __name__ == '__main__':

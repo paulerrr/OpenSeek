@@ -274,6 +274,7 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
     Splits a reply into its text content and OpenAI-style tool calls.
 
     Blocks that don't contain a valid call are left in the text. Bare JSON calls are accepted only for `tool_names`.
+    `tool_names` can map each name to its parameters schema, which DSML parameters are checked against.
     """
     spans = []
     for match in BLOCK_RE.finditer(text):
@@ -281,7 +282,7 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
             block_calls = [_parse_call(match.group("json"))]
         else:
             body = match.group("dsml") if match.group("dsml") is not None else match.group("invoke")
-            block_calls = _parse_dsml_calls(body)
+            block_calls = _parse_dsml_calls(body, tool_names)
         valid = bool(block_calls) and all(
             call is not None and (tool_names is None or call["function"]["name"] in tool_names)
             for call in block_calls
@@ -449,7 +450,37 @@ def _repair_call(body: str) -> dict | None:
     return _make_call(name, {key: _REPAIR_ESCAPE_RE.sub(unescape, value)})
 
 
-def _parse_dsml_calls(body: str) -> list[dict]:
+def _schema_properties(tool_names, name: str) -> dict | None:
+    """The parameters the request declares for a tool, or None when it gave no schema for it."""
+    schema = tool_names.get(name) if isinstance(tool_names, dict) else None
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    return properties if isinstance(properties, dict) and properties else None
+
+
+def _unwrap_arguments(arguments: dict, properties: dict | None) -> dict:
+    """
+    Unwraps a whole arguments object the model passed as one parameter named "arguments" (or "input").
+
+    With a schema, the wrapper is unwrapped only when it isn't one of the tool's real parameters and the wrapped keys
+    are. Without one, only "arguments" is unwrapped, since "input" is a common real parameter name.
+    """
+    if len(arguments) != 1:
+        return arguments
+    key, value = next(iter(arguments.items()))
+    if key not in ("arguments", "input") or (properties is None and key != "arguments"):
+        return arguments
+    # string="true" keeps the object as JSON text
+    if isinstance(value, str):
+        with contextlib.suppress(json.JSONDecodeError):
+            value = json.loads(value)
+    if not isinstance(value, dict):
+        return arguments
+    if properties is not None and (key in properties or not set(value) <= set(properties)):
+        return arguments
+    return value
+
+
+def _parse_dsml_calls(body: str, tool_names=None) -> list[dict]:
     body = re.sub(rf'<{_DSML}invoke\s*>', '</invoke>', body)
     body = _NAMED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>\3</parameter>', body)
     body = _BARE_DSML_CLOSE_RE.sub("</parameter>", body)
@@ -478,6 +509,7 @@ def _parse_dsml_calls(body: str) -> list[dict]:
         # Never turn unparsed or nested parameter markup into an empty/partial call.
         if _STRAY_PARAMETER_CLOSE_RE.sub("", _PARAMETER_RE.sub("", invoke_body)).strip():
             return []
+        properties = _schema_properties(tool_names, name)
         arguments = {}
         for key, is_string, value in _PARAMETER_RE.findall(invoke_body):
             if key in arguments or re.search(rf'</?{_DSML}', value):
@@ -486,19 +518,15 @@ def _parse_dsml_calls(body: str) -> list[dict]:
                 arguments[key] = value
             else:
                 try:
-                    arguments[key] = json.loads(value)
+                    parsed = json.loads(value)
                 except json.JSONDecodeError:
-                    arguments[key] = value
-        # The model sometimes passes the whole arguments object as one parameter named "arguments"
-        if list(arguments) == ["arguments"]:
-            value = arguments["arguments"]
-            # string="true" keeps the object as JSON text
-            if isinstance(value, str):
-                with contextlib.suppress(json.JSONDecodeError):
-                    value = json.loads(value)
-            if isinstance(value, dict):
-                arguments = value
-        calls.append(_make_call(name, arguments))
+                    parsed = value
+                # A parameter the schema declares as a string stays text, so "123" or "true" isn't converted
+                property_schema = (properties or {}).get(key)
+                if isinstance(property_schema, dict) and property_schema.get("type") == "string":
+                    parsed = value
+                arguments[key] = parsed
+        calls.append(_make_call(name, _unwrap_arguments(arguments, properties)))
     tail = _ORPHAN_CLOSE_RE.sub("", body[position:]) if calls else body[position:]
     return calls if not tail.strip() else []
 

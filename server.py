@@ -560,7 +560,11 @@ async def _chat_completions(req, x_opencode_session_id, deadline):
     )
     instructions_hash = _hash(instructions) if instructions else None
     # Bare JSON calls without tags are accepted only for these names
-    request_tools = {tool.get("function", tool).get("name") for tool in tools} if tools else None
+    # Tool name -> parameters schema; the parser checks DSML parameters against it
+    request_tools = {
+        function.get("name"): function.get("parameters")
+        for function in (tool.get("function", tool) for tool in tools)
+    } if tools else None
 
     if _is_title_request(system, history, tools):
         title = _local_title(_render_turn(pending, {}))
