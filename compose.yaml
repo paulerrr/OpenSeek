@@ -22,6 +22,8 @@ services:
       - openseek-data:/data
     # Xvfb needs /dev/shm for Chrome's shared memory
     shm_size: 256mb
+    # tini as PID 1 reaps orphaned Chrome processes, which python server.py never waits on
+    init: true
     restart: unless-stopped
 
 volumes:
