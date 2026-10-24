@@ -20,8 +20,10 @@ CLOSE_TAG = "</tool_call>"
 # DeepSeek's native markup: <｜DSML｜function_calls><｜DSML｜invoke name="..."><｜DSML｜parameter name="..." string="true">
 # The delimiter is a fullwidth bar, which can come back doubled or as ASCII, so the patterns are lenient
 _DSML = r"[｜|]+\s*DSML\s*[｜|]+\s*"
-_DSML_OPEN = rf"<{_DSML}(?:function_)?calls\s*>"
-_DSML_CLOSE_RE = re.compile(rf"</{_DSML}(?:function_)?calls\s*>")
+# The calls wrapper is named calls, function_calls, or tool_calls (DeepSeek V4)
+_DSML_CALLS = r"(?:function_|tool_)?calls"
+_DSML_OPEN = rf"<{_DSML}{_DSML_CALLS}\s*>"
+_DSML_CLOSE_RE = re.compile(rf"</{_DSML}{_DSML_CALLS}\s*>")
 # Calls may lack an outer wrapper, or have an extra slash before an invoke or parameter with a name attribute.
 # Inner closing tags sometimes come back without the DSML delimiter (</invoke>).
 _INVOKE_OPEN = rf'</?{_DSML}invoke\s+name="[^"]*"\s*>'
@@ -38,7 +40,7 @@ _PARAMETER_RE = re.compile(
 # The model sometimes shortens the opening tag to <call>
 _OPEN = rf"(?:{re.escape(OPEN_TAG)}|<call>)"
 _CLOSE = (
-    rf"</\s*[A-Za-z_-]*call[A-Za-z_-]*\s*>|</{_DSML}(?:(?:function_)?calls|invoke)\s*>"
+    rf"</\s*[A-Za-z_-]*call[A-Za-z_-]*\s*>|</{_DSML}(?:{_DSML_CALLS}|invoke)\s*>"
     rf"|(?={_OPEN}|{_DSML_OPEN}|{_INVOKE_OPEN})"
 )
 BLOCK_RE = re.compile(
@@ -57,7 +59,7 @@ _CLOSE_TAG_RE = re.compile(_CLOSE)
 # Stray closing markup is discarded only immediately after a successfully parsed call. That includes a
 # </tool_result> echoed from the format results arrive in.
 _ORPHAN_CLOSE_RE = re.compile(
-    rf'</{_DSML}(?:(?:function_)?calls|parameter|invoke)\s*>|</\s*(?:tool[ _-]?)?(?:calls?|results?)\s*>'
+    rf'</{_DSML}(?:{_DSML_CALLS}|parameter|invoke)\s*>|</\s*(?:tool[ _-]?)?(?:calls?|results?)\s*>'
 )
 # DSML parameters closed by an invoke tag whose opening tag is missing. With no tool name it can't be called, so it is
 # discarded like stray closing markup, and only immediately after a successfully parsed call.
@@ -79,14 +81,14 @@ _STRAY_PARAMETER_CLOSE_RE = re.compile(rf'</(?:{_DSML})?parameter\s*>')
 # A parameter tag that lost its `parameter name="` prefix (<｜DSML｜ limit" string="false">), recognized by the stray
 # quote after the name
 _MANGLED_PARAMETER_RE = re.compile(
-    rf'<{_DSML}(?!(?:parameter|invoke|(?:function_)?calls)\b)([A-Za-z_][\w-]*)"(\s+string="(?:true|false)")?\s*>'
+    rf'<{_DSML}(?!(?:parameter|invoke|{_DSML_CALLS})\b)([A-Za-z_][\w-]*)"(\s+string="(?:true|false)")?\s*>'
 )
 # A parameter closed by a closing tag with no name at all (</｜DSML｜>)
 _BARE_DSML_CLOSE_RE = re.compile(rf'</{_DSML}>')
 # A mangled parameter may also close with its own name instead of "parameter".
 # Require the names to match so ambiguous markup is never guessed into arguments.
 _NAMED_PARAMETER_RE = re.compile(
-    rf'<{_DSML}(?!(?:parameter|invoke|(?:function_)?calls)\b)([A-Za-z_][\w-]*)"'
+    rf'<{_DSML}(?!(?:parameter|invoke|{_DSML_CALLS})\b)([A-Za-z_][\w-]*)"'
     rf'(\s+string="(?:true|false)")?\s*>((?:(?!</?{_DSML}).)*?)</{_DSML}\1\s*>',
     re.DOTALL,
 )

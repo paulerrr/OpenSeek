@@ -688,5 +688,25 @@ class DsmlSchemaTests(unittest.TestCase):
         self.assertEqual(json.loads(remembered[0][2][0]['function']['arguments']), {'command': 'true'})
 
 
+
+class DsmlToolCallsWrapperTests(unittest.TestCase):
+    # From deepseek-ai/DeepSeek-V4-Pro discussion 209: V4 names the wrapper tool_calls, sometimes with ASCII bars
+    def test_tool_calls_wrapper_is_parsed_and_removed(self):
+        for bar in ['||', '｜']:
+            dsml = f'<{bar}DSML{bar}'
+            parameter = f'{dsml}parameter name="query" string="true">bond detail fields display</{bar}DSML{bar}parameter>'
+            invoke = f'{dsml}invoke name="search">{parameter}'
+            for text in [f'Let me search.{dsml}tool_calls>{invoke}</{bar}DSML{bar}invoke></{bar}DSML{bar}tool_calls>',
+                         f'Let me search.\n{dsml}tool_calls>\n{invoke}\n</{bar}DSML{bar}tool_calls>']:
+                with self.subTest(text=text):
+                    content, calls = parse_tool_calls(text, {'search'})
+                    self.assertEqual(content, 'Let me search.')
+                    self.assertEqual([call['function']['name'] for call in calls], ['search'])
+                    self.assertEqual(json.loads(calls[0]['function']['arguments']), {'query': 'bond detail fields display'})
+                    stream = ToolCallStreamFilter({'search'})
+                    # Streaming passes the newline before the block through, as it does for other wrappers
+                    streamed = ''.join(stream.feed(char) for char in text) + stream.finish()
+                    self.assertEqual(streamed.strip(), 'Let me search.')
+
 if __name__ == '__main__':
     unittest.main()
