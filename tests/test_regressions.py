@@ -221,6 +221,42 @@ MERGED_PARAMETER_TAGS = (
     'C:\\New folder</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ calls>'
 )
 
+# Parameter tags missing " name" before the name attribute, closed by nameless tags
+NAMELESS_ATTRIBUTE = '''Re-issuing it.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="edit">
+<｜｜DSML｜｜ parameter name="newString" string="true">    code = str(raw.get("code", ""))
+    return code</｜DSML｜｜>
+<｜｜DSML｜｜ parameter="oldString" string="true">    return raw</｜DSML｜｜>
+<｜｜DSML｜｜ parameter="path" string="true">C:\\New folder\\exposure.py</｜｜DSML｜｜>
+</｜｜DSML｜｜>
+</｜｜DSML｜｜ calls>'''
+
+# An empty opening tag before the first parameter
+EMPTY_OPEN_TAG = '''Threading it through.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="edit">
+<｜｜DSML｜｜>
+<｜｜DSML｜｜ parameter name="newString" string="true">b</｜DSML｜｜>
+<｜｜DSML｜｜ parameter name="oldString" string="true">a</｜DSML｜｜>
+<｜｜DSML｜｜ parameter name="path" string="true">/x/exposure.py</｜DSML｜｜>
+</｜｜DSML｜｜>
+</｜｜DSML｜｜ calls>'''
+
+# A calls opener repeated between invokes, with the second invoke closed by a stray parameter tag
+REPEATED_OPENER = '''Checking the code.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/exposure.py</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="offset" string="false">226</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">/x/exposure.py</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="offset" string="false">458</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ calls>'''
+
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcript_malformed_calls(self):
@@ -238,6 +274,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (ECHOED_RESULT_CLOSE, ['read', 'read'], 'Reading.'),
                                     (SLASHLESS_CLOSE, ['shell'], 'Running.'),
                                     (MERGED_PARAMETER_TAGS, ['glob', 'shell'], 'Checking.'),
+                                    (NAMELESS_ATTRIBUTE, ['edit'], 'Re-issuing it.'),
+                                    (EMPTY_OPEN_TAG, ['edit'], 'Threading it through.'),
+                                    (REPEATED_OPENER, ['read', 'read'], 'Checking the code.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)
@@ -267,6 +306,15 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         calls = parse_tool_calls(MERGED_PARAMETER_TAGS, TOOL_NAMES)[1]
         self.assertEqual(json.loads(calls[1]['function']['arguments']),
                          {'command': 'ls\n-la', 'workdir': 'C:\\New folder'})
+        calls = parse_tool_calls(NAMELESS_ATTRIBUTE, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[0]['function']['arguments']),
+                         {'newString': '    code = str(raw.get("code", ""))\n    return code',
+                          'oldString': '    return raw', 'path': 'C:\\New folder\\exposure.py'})
+        calls = parse_tool_calls(EMPTY_OPEN_TAG, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[0]['function']['arguments']),
+                         {'newString': 'b', 'oldString': 'a', 'path': '/x/exposure.py'})
+        calls = parse_tool_calls(REPEATED_OPENER, TOOL_NAMES)[1]
+        self.assertEqual([json.loads(c['function']['arguments'])['offset'] for c in calls], [226, 458])
 
     async def test_mixed_call_boundaries_preserve_following_content(self):
         call = '<tool_call>{"name":"shell","arguments":{"command":"ls"}}</call-tool>'

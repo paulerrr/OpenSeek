@@ -86,6 +86,10 @@ _MANGLED_PARAMETER_RE = re.compile(
 )
 # A parameter closed by a closing tag with no name at all (</｜DSML｜>)
 _BARE_DSML_CLOSE_RE = re.compile(rf'</{_DSML}>')
+# A parameter tag that lost the " name" before its name attribute (<｜DSML｜parameter="path">)
+_NAMELESS_ATTRIBUTE_RE = re.compile(rf'(</?{_DSML}parameter)="')
+# An opening tag with no name at all (<｜DSML｜>), and a calls opener repeated inside a wrapper; both are noise
+_EMPTY_DSML_OPEN_RE = re.compile(rf'<{_DSML}>|{_DSML_OPEN}')
 # A parameter closing tag that lost its "</" (value｜DSML｜parameter>)
 _SLASHLESS_PARAMETER_CLOSE_RE = re.compile(rf'(?<![<\/｜|]){_DSML}parameter\s*>')
 # Parameter and invoke tags, for spotting a closing tag that also names the next parameter
@@ -226,6 +230,14 @@ CUT_NOTE = (
 )
 
 
+# Sent as the next message when a reply's tool call markup couldn't be parsed, so the model writes the call again
+RETRY_NOTE = (
+    "Your last tool call was malformed, so it did not run and was not shown. Write the call again now as "
+    f"{OPEN_TAG}{{\"name\": ..., \"arguments\": {{...}}}}{CLOSE_TAG} blocks, each holding one valid JSON object and "
+    "naming a listed tool. Do not repeat the rest of your reply. Then stop and wait for the results."
+)
+
+
 def tool_turn_instructions(tools: list[dict] | None, tool_choice=None) -> str:
     """Restate turn-specific permissions even when the chat retains older tools."""
     if not tools or tool_choice == "none":
@@ -321,6 +333,23 @@ def parse_tool_calls(text: str, tool_names=None) -> tuple[str, list[dict]]:
     parts.append(text[position:])
     content = re.sub(r"\n{3,}", "\n\n", "".join(parts))
     return content.strip(), calls
+
+
+# Call markup left in a reply's text, and the code fences it is ignored inside
+_CALL_MARKUP_RE = re.compile(rf"</?{_DSML}|{_OPEN}")
+_FENCED_BLOCK_RE = re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE)
+
+
+def has_malformed_calls(text: str, tool_names=None) -> bool:
+    """Whether a reply tried to call a tool, outside code fences, but no call could be parsed from it."""
+    content, calls = parse_tool_calls(text, tool_names)
+    return not calls and bool(_CALL_MARKUP_RE.search(_FENCED_BLOCK_RE.sub("", content)))
+
+
+def call_markup_start(text: str) -> int:
+    """Where call markup may start in streamed text: its first opening tag, or a trailing "<" that may become one."""
+    match = _OPEN_RE.search(text)
+    return match.start() if match else len(text) - _partial_tag_length(text)
 
 
 def _bare_call_spans(text: str, blocks: list[tuple[int, int]], tool_names) -> list[tuple[int, int, list[dict]]]:
@@ -502,6 +531,8 @@ def _split_merged_parameter_tags(body: str) -> str:
 
 
 def _parse_dsml_calls(body: str, tool_names=None) -> list[dict]:
+    body = _EMPTY_DSML_OPEN_RE.sub("", body)
+    body = _NAMELESS_ATTRIBUTE_RE.sub(r'\1 name="', body)
     body = re.sub(rf'<{_DSML}invoke\s*>', '</invoke>', body)
     body = _SLASHLESS_PARAMETER_CLOSE_RE.sub("</parameter>", body)
     body = _split_merged_parameter_tags(body)

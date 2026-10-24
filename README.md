@@ -119,7 +119,8 @@ Check `curl -f http://localhost:8888/health` after startup; a ready session retu
   braces, and unknown escapes are kept literally. Calls with several arguments are never repaired.
 - DSML parameter closing tags missing their `</`, a closing tag that also names the next parameter
   (`value</｜DSML｜parameter name="next">`), and an invoke left open before a second calls opener that ends the
-  wrapper are accepted too.
+  wrapper are accepted too. So are parameter tags missing ` name` (`parameter="path"`), empty `<｜DSML｜>` opening
+  tags, and a `calls` opener repeated inside a wrapper.
 - A DSML call whose only parameter is `arguments` is unwrapped, including when it is sent as JSON text
   (`string="true"`), and an invoke left open before the closing `calls` tag is closed. When the tool declares a
   parameters schema, an `input` wrapper is unwrapped too, but a wrapper is kept when it is one of the tool's real
@@ -321,7 +322,12 @@ observations by listing ID, compare equivalent products, disclose filters, and v
 These instructions guide the model; OpenSeek does not independently validate its statistical conclusions.
 Custom prompt files replace the default prompt and must include any desired guidance themselves.
 
-Malformed tool-call blocks remain ordinary text in their original position. The exception is stray markup
+When a reply with tools tries to call one but no call can be parsed, OpenSeek drops the broken markup and asks DeepSeek once,
+in the same chat, to write the call again; the client gets the text before the markup followed by the second attempt.
+Markup inside code fences doesn't count, and text after the first call tag is held back until the reply shows a valid
+call or ends. A second malformed attempt is returned as text. Set `OPENSEEK_RETRY_MALFORMED_CALLS=0` to turn this off.
+
+Otherwise, malformed tool-call blocks remain ordinary text in their original position. The exception is stray markup
 immediately after a valid call: closing tags, and DSML parameters whose `invoke` opening tag is missing, are
 discarded, since without a tool name they can't be called. Interrupted or failed upstream requests
 return an error (an SSE error event when streaming), rather than a successful partial answer, and are not recorded
@@ -363,6 +369,7 @@ Run `node --test tests/interceptor.test.cjs` to check browser transport-error ha
 | `OPENSEEK_STATE_FILE`         | `<OPENSEEK_USER_DATA_DIR>/openseek-sessions.json` | File that saves opencode sessions and their DeepSeek chats across restarts |
 | `OPENSEEK_SYSTEM_PROMPT_FILE` | -       | File that replaces the default instructions (an empty file disables them) |
 | `OPENSEEK_LOCAL_TITLES`      | `1`     | Answer opencode's session-title requests locally instead of using the browser; `0` sends them to DeepSeek |
+| `OPENSEEK_RETRY_MALFORMED_CALLS` | `1` | Ask DeepSeek once to write a tool call again when its markup can't be parsed; `0` returns the reply as text |
 
 **Requirements:** Python 3.10+, Chrome or Chromium, and Xvfb on Linux servers without a display (installed automatically in Docker).
 

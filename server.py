@@ -54,12 +54,15 @@ from openseek.internal.objects import Response, StreamEvent
 from openseek.internal.research import stream_research
 from openseek.internal.tools import (
     CUT_NOTE,
+    RETRY_NOTE,
     FabricatedResultGuard,
     ToolCallStreamFilter,
     ToolOutputGuard,
     build_tools_prompt,
+    call_markup_start,
     format_tool_call,
     format_tool_result,
+    has_malformed_calls,
     parse_tool_calls,
     tool_turn_instructions,
 )
@@ -79,6 +82,8 @@ BROWSER_TIMEOUT = float(os.getenv("OPENSEEK_BROWSER_TIMEOUT", "20"))
 SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
 # Answer opencode's session-title requests locally instead of tying up the browser; "0" sends them to DeepSeek
 LOCAL_TITLES = os.getenv("OPENSEEK_LOCAL_TITLES", "1") != "0"
+# Ask DeepSeek once to write a tool call again when its markup can't be parsed; "0" returns the reply as text
+RETRY_MALFORMED_CALLS = os.getenv("OPENSEEK_RETRY_MALFORMED_CALLS", "1") != "0"
 # When set, /v1 requests must send it as a Bearer token (the OpenAI SDK's api_key); unset leaves the API open
 API_KEY = os.getenv("OPENSEEK_API_KEY") or None
 # Where opencode sessions and their DeepSeek chats are saved, so they survive a restart
@@ -343,6 +348,60 @@ async def _guard_tool_output(stream, forget=lambda: None):
     except OpenSeekException:
         forget()
         raise
+    finally:
+        await stream.aclose()
+
+
+async def _retry_malformed_calls(stream, tool_names, retry):
+    """
+    Asks DeepSeek once more when a reply tries to call a tool but no call can be parsed from it.
+
+    Text from the first call opening tag is held back until the reply shows a valid call or ends. A reply that ends
+    with only malformed markup has that markup dropped, and `retry(chat_id)` streams the model's second attempt in
+    the same chat. Once a valid call appears the held text is released and no retry is made, so the guards after
+    this one still see fabricated results as they stream.
+    """
+    text, released, holding = "", 0, True
+    try:
+        async for event in stream:
+            if event.type == "text":
+                text += event.content
+                if holding and ">" in event.content and parse_tool_calls(text, tool_names)[1]:
+                    holding = False
+                end = max(released, call_markup_start(text)) if holding else len(text)
+                if end > released:
+                    yield StreamEvent("text", text[released:end])
+                    released = end
+                continue
+            if event.type != "done":
+                yield event
+                continue
+            response = event.response
+            if not holding or not response.chat_id or not has_malformed_calls(response.text, tool_names):
+                if released < len(text):
+                    yield StreamEvent("text", text[released:])
+                yield event
+                return
+            logger.warning("Reply had a malformed tool call; asking DeepSeek to write it again")
+            kept = text[:released]
+            retry_stream = retry(response.chat_id)
+            try:
+                async for retry_event in retry_stream:
+                    if retry_event.type == "done":
+                        second = retry_event.response
+                        thinking = "\n\n".join(
+                            part for part in (response.deepthink_content, second.deepthink_content) if part
+                        )
+                        retry_event = StreamEvent("done", response=Response(
+                            kept + second.text,
+                            chat_id=second.chat_id or response.chat_id,
+                            deepthink_content=thinking or None,
+                            token_usage=second.token_usage,
+                        ))
+                    yield retry_event
+            finally:
+                await retry_stream.aclose()
+            return
     finally:
         await stream.aclose()
 
@@ -692,6 +751,17 @@ async def _chat_completions(req, x_opencode_session_id, deadline):
                 _save_sessions()
 
         stream = _guard_tool_output(stream, forget)
+        if RETRY_MALFORMED_CALLS:
+            def retry(retry_chat_id):
+                return _guard_tool_output(ds.stream_message(
+                    RETRY_NOTE,
+                    deepthink=_wants_deepthink(req),
+                    timeout=TIMEOUT,
+                    chat_id=retry_chat_id,
+                    system_prompt=tool_turn_instructions(tools, req.tool_choice),
+                ), forget)
+
+            stream = _retry_malformed_calls(stream, request_tools, retry)
         stream = _cut_fabricated_results(stream, request_tools, lambda: chat_id or ds.active_chat_id, on_cut)
     stream = _request_deadline(
         _remove_after(stream, directory), deadline=deadline
