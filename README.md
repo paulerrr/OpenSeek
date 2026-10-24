@@ -352,6 +352,7 @@ Run `node --test tests/interceptor.test.cjs` to check browser transport-error ha
 | `DEEPSEEK_TOKEN`              | -       | User token (recommended)                                          |
 | `DEEPSEEK_EMAIL` / `DEEPSEEK_PASSWORD` | - | Alternative to the token; may hit email verification          |
 | `OPENSEEK_PORT`               | `8888`  | Server port                                                       |
+| `OPENSEEK_API_KEY`            | -       | When set, `/v1` requests need `Authorization: Bearer <key>` (the client's `api_key`); `/health` stays open |
 | `OPENSEEK_REQUEST_TIMEOUT` | `120` | Overall queue, browser and generation budget, including all research turns |
 | `OPENSEEK_TIMEOUT`            | `300`   | Seconds to wait for a reply                                       |
 | `OPENSEEK_USER_DATA_DIR`      | -       | Persistent Chrome profile directory                               |

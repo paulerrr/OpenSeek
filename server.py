@@ -28,6 +28,7 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import sys
 import tempfile
@@ -41,7 +42,7 @@ from pathlib import Path
 from typing import Annotated
 
 import uvicorn
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -77,6 +78,8 @@ REQUEST_TIMEOUT = float(os.getenv("OPENSEEK_REQUEST_TIMEOUT", "120"))
 SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
 # Answer opencode's session-title requests locally instead of tying up the browser; "0" sends them to DeepSeek
 LOCAL_TITLES = os.getenv("OPENSEEK_LOCAL_TITLES", "1") != "0"
+# When set, /v1 requests must send it as a Bearer token (the OpenAI SDK's api_key); unset leaves the API open
+API_KEY = os.getenv("OPENSEEK_API_KEY") or None
 # Where opencode sessions and their DeepSeek chats are saved, so they survive a restart
 STATE_FILE = os.getenv("OPENSEEK_STATE_FILE") or (
     str(Path(USER_DATA_DIR) / "openseek-sessions.json") if USER_DATA_DIR else None
@@ -180,6 +183,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+def _check_api_key(authorization: Annotated[str | None, Header()] = None) -> None:
+    if API_KEY is None:
+        return
+    scheme, _, key = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(key.strip().encode(), API_KEY.encode()):
+        raise HTTPException(status_code=401, detail="Invalid API key", headers={"WWW-Authenticate": "Bearer"})
 
 
 class _Message(BaseModel):
@@ -525,7 +536,7 @@ def _wants_deepresearch(req: _ChatRequest) -> bool:
     return "research" in req.model.lower()
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=[Depends(_check_api_key)])
 async def chat_completions(req: _ChatRequest, x_opencode_session_id: Annotated[str | None, Header()] = None):
     deadline = asyncio.get_running_loop().time() + REQUEST_TIMEOUT
     try:
@@ -860,7 +871,7 @@ async def _with_keepalive(stream):
         await iterator.aclose()
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=[Depends(_check_api_key)])
 async def list_models():
     return {
         "object": "list",
