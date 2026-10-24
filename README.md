@@ -117,6 +117,9 @@ Check `curl -f http://localhost:8888/health` after startup; a ready session retu
 - A call with a single string argument whose JSON is broken by unescaped double quotes or a non-JSON backslash
   escape (`grep -n "a\|b" file` written as-is) is repaired: the value runs to the last quote before the closing
   braces, and unknown escapes are kept literally. Calls with several arguments are never repaired.
+- DSML parameter closing tags missing their `</`, a closing tag that also names the next parameter
+  (`value</｜DSML｜parameter name="next">`), and an invoke left open before a second calls opener that ends the
+  wrapper are accepted too.
 - A DSML call whose only parameter is `arguments` is unwrapped, including when it is sent as JSON text
   (`string="true"`), and an invoke left open before the closing `calls` tag is closed. When the tool declares a
   parameters schema, an `input` wrapper is unwrapped too, but a wrapper is kept when it is one of the tool's real

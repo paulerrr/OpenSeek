@@ -204,6 +204,23 @@ APK_CALLS = [
 ]
 APK_CALLS.append(APK_CALLS[1].replace('<tool_call>\n', ''))
 
+# Parameters closed without "</", and the invoke left open before a second wrapper opener that ends the reply
+SLASHLESS_CLOSE = (
+    'Running.\n<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="shell"> '
+    '<｜｜DSML｜｜ parameter name="command" string="true">python t.py</｜｜DSML｜｜ parameter> '
+    '<｜｜DSML｜｜ parameter name="workdir" string="true">C:\\New folder｜｜DSML｜｜ parameter> '
+    '<｜｜DSML｜｜ parameter name="timeout" string="false">60000｜｜DSML｜｜ parameter> <｜｜DSML｜｜ calls>'
+)
+
+# A parameter closed by a closing tag that also names the next parameter
+MERGED_PARAMETER_TAGS = (
+    'Checking.\n<｜｜DSML｜｜ calls> <｜｜DSML｜｜ invoke name="glob"> '
+    '<｜｜DSML｜｜ parameter name="pattern" string="true">*</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ parameter> '
+    '</｜｜DSML｜｜ invoke> <｜｜DSML｜｜ invoke name="shell"> '
+    '<｜｜DSML｜｜ parameter name="command" string="true">ls\n-la</｜｜DSML｜｜ parameter name="workdir" string="true">'
+    'C:\\New folder</｜｜DSML｜｜ parameter> </｜｜DSML｜｜ calls>'
+)
+
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcript_malformed_calls(self):
@@ -219,6 +236,8 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                                     (REOPENED_WRAPPER, ['read', 'read'], 'Reading.'),
                                     (DOUBLE_PARAMETER_CLOSE, ['read', 'glob', 'read'], 'Checking.'),
                                     (ECHOED_RESULT_CLOSE, ['read', 'read'], 'Reading.'),
+                                    (SLASHLESS_CLOSE, ['shell'], 'Running.'),
+                                    (MERGED_PARAMETER_TAGS, ['glob', 'shell'], 'Checking.'),
                                     *((text, ['shell'], 'Checking.') for text in APK_CALLS)]:
             content, remembered, payloads = await self.collect(text)
             self.assertEqual(content.strip(), prefix)
@@ -242,6 +261,12 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             calls = parse_tool_calls(text, TOOL_NAMES)[1]
             self.assertEqual(json.loads(calls[1]['function']['arguments']),
                              {'path': '/x/openseek/openseek.py', 'limit': 150})
+        calls = parse_tool_calls(SLASHLESS_CLOSE, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[0]['function']['arguments']),
+                         {'command': 'python t.py', 'workdir': 'C:\\New folder', 'timeout': 60000})
+        calls = parse_tool_calls(MERGED_PARAMETER_TAGS, TOOL_NAMES)[1]
+        self.assertEqual(json.loads(calls[1]['function']['arguments']),
+                         {'command': 'ls\n-la', 'workdir': 'C:\\New folder'})
 
     async def test_mixed_call_boundaries_preserve_following_content(self):
         call = '<tool_call>{"name":"shell","arguments":{"command":"ls"}}</call-tool>'

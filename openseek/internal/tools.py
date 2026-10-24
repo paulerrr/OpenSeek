@@ -46,7 +46,8 @@ _CLOSE = (
 BLOCK_RE = re.compile(
     rf"{_OPEN}(?P<json>(?:(?!{_OPEN}).)*?)(?:{_CLOSE}|\Z)"
     rf"|{_DSML_OPEN}(?P<dsml>.*?){_DSML_CLOSE_RE.pattern}"
-    rf"|(?P<invoke>{_INVOKE_OPEN}.*?{_INVOKE_CLOSE})",
+    # An invoke may be left open when the model ends its wrapper with a second opener (<｜DSML｜calls>)
+    rf"|(?P<invoke>{_INVOKE_OPEN}.*?(?:{_INVOKE_CLOSE}|(?=\s*{_DSML_OPEN})))",
     re.DOTALL,
 )
 # An empty DSML opener at end of output is discarded only after a validated call.
@@ -85,6 +86,13 @@ _MANGLED_PARAMETER_RE = re.compile(
 )
 # A parameter closed by a closing tag with no name at all (</｜DSML｜>)
 _BARE_DSML_CLOSE_RE = re.compile(rf'</{_DSML}>')
+# A parameter closing tag that lost its "</" (value｜DSML｜parameter>)
+_SLASHLESS_PARAMETER_CLOSE_RE = re.compile(rf'(?<![<\/｜|]){_DSML}parameter\s*>')
+# Parameter and invoke tags, for spotting a closing tag that also names the next parameter
+# (value</｜DSML｜parameter name="next">), which closes the open parameter and opens the next
+_PARAMETER_TAGS_RE = re.compile(
+    rf'(?P<open></?{_DSML}parameter\s+name=")|</(?:{_DSML})?parameter\s*>|</?(?:{_DSML})?invoke\b'
+)
 # A mangled parameter may also close with its own name instead of "parameter".
 # Require the names to match so ambiguous markup is never guessed into arguments.
 _NAMED_PARAMETER_RE = re.compile(
@@ -482,8 +490,21 @@ def _unwrap_arguments(arguments: dict, properties: dict | None) -> dict:
     return value
 
 
+def _split_merged_parameter_tags(body: str) -> str:
+    """Closes an open parameter before a slashed parameter tag; without one open, the slash is just extra."""
+    parts, position, is_open = [], 0, False
+    for tag in _PARAMETER_TAGS_RE.finditer(body):
+        if tag.group("open") and is_open and tag.group().startswith("</"):
+            parts.append(body[position:tag.start()] + "</parameter>")
+            position = tag.start()
+        is_open = bool(tag.group("open"))
+    return "".join(parts) + body[position:]
+
+
 def _parse_dsml_calls(body: str, tool_names=None) -> list[dict]:
     body = re.sub(rf'<{_DSML}invoke\s*>', '</invoke>', body)
+    body = _SLASHLESS_PARAMETER_CLOSE_RE.sub("</parameter>", body)
+    body = _split_merged_parameter_tags(body)
     body = _NAMED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>\3</parameter>', body)
     body = _BARE_DSML_CLOSE_RE.sub("</parameter>", body)
     body = _MANGLED_PARAMETER_RE.sub(r'<｜DSML｜parameter name="\1"\2>', _close_dangling_invoke(body))
