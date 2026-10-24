@@ -358,6 +358,7 @@ Run `node --test tests/interceptor.test.cjs` to check browser transport-error ha
 | `OPENSEEK_API_KEY`            | -       | When set, `/v1` requests need `Authorization: Bearer <key>` (the client's `api_key`); `/health` stays open |
 | `OPENSEEK_REQUEST_TIMEOUT` | `120` | Overall queue, browser and generation budget, including all research turns |
 | `OPENSEEK_TIMEOUT`            | `300`   | Seconds to wait for a reply                                       |
+| `OPENSEEK_BROWSER_TIMEOUT`    | `20`    | Seconds each browser command may take before the browser is replaced; typing a message gets 1 extra second per 1,000 characters |
 | `OPENSEEK_USER_DATA_DIR`      | -       | Persistent Chrome profile directory                               |
 | `OPENSEEK_STATE_FILE`         | `<OPENSEEK_USER_DATA_DIR>/openseek-sessions.json` | File that saves opencode sessions and their DeepSeek chats across restarts |
 | `OPENSEEK_SYSTEM_PROMPT_FILE` | -       | File that replaces the default instructions (an empty file disables them) |

@@ -11,6 +11,8 @@ services:
       - OPENSEEK_PORT=8888
       - OPENSEEK_API_KEY=${OPENSEEK_API_KEY:-}
       - OPENSEEK_REQUEST_TIMEOUT=${OPENSEEK_REQUEST_TIMEOUT:-120}
+      - OPENSEEK_TIMEOUT=${OPENSEEK_TIMEOUT:-300}
+      - OPENSEEK_BROWSER_TIMEOUT=${OPENSEEK_BROWSER_TIMEOUT:-20}
       - OPENSEEK_LOCAL_TITLES=${OPENSEEK_LOCAL_TITLES:-1}
       - OPENSEEK_STATE_FILE=/data/sessions.json
       # Set only when a prompt file is given; the server then reads it instead of its default prompt

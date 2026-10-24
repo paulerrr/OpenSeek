@@ -74,6 +74,7 @@ TOKEN = os.getenv("DEEPSEEK_TOKEN", "")
 USER_DATA_DIR = os.getenv("OPENSEEK_USER_DATA_DIR") or None
 TIMEOUT = int(os.getenv("OPENSEEK_TIMEOUT", "300"))
 REQUEST_TIMEOUT = float(os.getenv("OPENSEEK_REQUEST_TIMEOUT", "120"))
+BROWSER_TIMEOUT = float(os.getenv("OPENSEEK_BROWSER_TIMEOUT", "20"))
 # A file whose contents replace the default instructions; an empty file disables them
 SYSTEM_PROMPT_FILE = os.getenv("OPENSEEK_SYSTEM_PROMPT_FILE") or None
 # Answer opencode's session-title requests locally instead of tying up the browser; "0" sends them to DeepSeek
@@ -173,7 +174,8 @@ async def lifespan(app: FastAPI):
     _load_sessions()
     logger.info("Launching DeepSeek browser session...")
     state.deepseek = DeepSeek(
-        email=EMAIL, password=PASSWORD, token=TOKEN, headless=True, user_data_dir=USER_DATA_DIR
+        email=EMAIL, password=PASSWORD, token=TOKEN, headless=True, user_data_dir=USER_DATA_DIR,
+        browser_timeout=BROWSER_TIMEOUT,
     )
     await state.deepseek.initialize()
     logger.info("Ready — listening on http://localhost:%d/v1", PORT)

@@ -42,6 +42,7 @@ class DeepSeek:
         chrome_args: list[str] | None = None,
         attempt_cf_bypass: bool = True,
         user_data_dir: str | None = None,
+        browser_timeout: float = 20.0,
     ) -> None:
         """
         DeepSeek API automation class.
@@ -57,6 +58,8 @@ class DeepSeek:
             attempt_cf_bypass (bool): Whether to bypass Cloudflare protection.
             user_data_dir (Optional[str]): Persistent Chrome profile directory, so a logged-in session
                 survives restarts.
+            browser_timeout (float): Seconds each browser command may take before the browser is replaced.
+                Typing a long message gets extra time on top of this.
 
         Raises:
             MissingCredentials: If neither a token nor email and password are provided.
@@ -77,7 +80,7 @@ class DeepSeek:
         self._healthy = False
         self._recovery_task = None
         self._keepalive_task = None
-        self.browser_timeout = 20.0
+        self.browser_timeout = browser_timeout
         self.recovery_timeout = 60.0
         # Serializes browser interactions so the keep-alive reload never interrupts a response
         self._lock = asyncio.Lock()
@@ -146,9 +149,9 @@ class DeepSeek:
         await self._login()
         self._healthy = True
 
-    async def _browser_call(self, operation):
+    async def _browser_call(self, operation, extra: float = 0):
         """Bound CDP commands even when the renderer stops answering."""
-        return await asyncio.wait_for(operation, self.browser_timeout)
+        return await asyncio.wait_for(operation, self.browser_timeout + extra)
 
     async def _stop_browser(self):
         browser = getattr(self, "browser", None)
@@ -438,7 +441,8 @@ class DeepSeek:
                 await self._browser_call(tab.send(cdp.input_.insert_text(char)))
                 await asyncio.sleep(slow_mode_delay)
         else:
-            await self._browser_call(tab.send(cdp.input_.insert_text(message)))
+            # DeepSeek's editor can take a while to take in long text, such as several tool results at once
+            await self._browser_call(tab.send(cdp.input_.insert_text(message)), extra=len(message) / 1000)
 
         # Arm the interceptor: the next completion request gets these payload changes
         token = uuid.uuid4().hex
